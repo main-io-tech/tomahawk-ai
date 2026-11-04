@@ -1,0 +1,64 @@
+<idea-plugin>
+    <id>com.mio.tomahawk</id>
+    <name>Tomahawk IA</name>
+    <vendor>Mio</vendor>
+
+    <description><![CDATA[
+    <p>An attack system for Spec-Driven Development: fire GitHub Spec Kit commands through your AI coding
+    agent CLI, evaluate what was generated and monitor every run, without leaving the IDE.</p>
+    <p><b>Do alvo ao impacto, guiado pela spec.</b> O Tomahawk IA conduz a missão SDD do
+    <a href="https://github.com/github/spec-kit">Spec Kit</a> etapa por etapa: dispara os comandos <code>/speckit</code>
+    pelo Cursor CLI ou pelo Claude Code, avalia os artefatos gerados e monitora cada execução.</p>
+    <h3>Sistemas de ataque</h3>
+    <ul>
+      <li><b>🚀 Lançador:</b> a missão da feature ativa em nove etapas (Regras de Engajamento, Designar Alvo,
+        Reconhecimento, Plano de Voo, Pré-voo, Waypoints, Simulação de Rota, Lançamento e Avaliação de Danos), com o
+        estado de cada uma lido dos artefatos e a próxima em destaque. Escreva a entrada e lance na aba ou no terminal
+        da IDE, ou copie o comando para o chat do agente.</li>
+      <li><b>🎯 Avaliação:</b> o que foi gerado em <code>specs/NNN-feature/</code>: histórias e requisitos da spec,
+        pontos <code>[NEEDS CLARIFICATION]</code>, contexto técnico do plano, tarefas por fase e checklists, com um
+        duplo clique para abrir o trecho.</li>
+      <li><b>📡 Telemetria:</b> a missão em voo com o log ao vivo de cada passo da IA e o histórico das execuções em
+        <code>tomahawk/execucoes/</code>, com situação, veredito da convergência e duração.</li>
+    </ul>
+    ]]></description>
+
+    <change-notes><![CDATA[
+    <h3>0.1.0</h3>
+    <ul>
+      <li>Primeira versão: Lançador, Avaliação e Telemetria para o Spec Kit, com Cursor CLI e Claude Code.</li>
+    </ul>
+    ]]></change-notes>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends optional="true" config-file="tomahawk-terminal.xml">org.jetbrains.plugins.terminal</depends>
+
+    <extensionPoints>
+        <extensionPoint name="launchTerminal"
+                        interface="com.mio.tomahawk.run.LaunchTerminal"
+                        dynamic="true"/>
+    </extensionPoints>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="Tomahawk IA" displayType="BALLOON"/>
+        <fileEditorProvider implementation="com.mio.tomahawk.view.ArtifactEditorProvider"/>
+        <applicationConfigurable parentId="tools"
+                                 instance="com.mio.tomahawk.settings.TomahawkConfigurable"
+                                 id="com.mio.tomahawk.settings"
+                                 displayName="Tomahawk IA"/>
+        <toolWindow id="Tomahawk IA"
+                    anchor="right"
+                    icon="/icons/toolWindow.svg"
+                    factoryClass="com.mio.tomahawk.base.TomahawkToolWindowFactory"/>
+    </extensions>
+
+    <actions>
+        <action id="Tomahawk.InitSpecKit"
+                class="com.mio.tomahawk.run.InitSpecKitAction"
+                text="Tomahawk IA: Inicializar Spec Kit"
+                description="Roda specify init --here no terminal da IDE, com a integração do CLI de IA configurado"
+                icon="/icons/lancador.svg">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

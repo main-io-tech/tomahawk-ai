@@ -1,0 +1,6 @@
+<!-- Com o plugin de terminal, as missões podem rodar no terminal da IDE. -->
+<idea-plugin>
+    <extensions defaultExtensionNs="com.mio.tomahawk">
+        <launchTerminal implementation="com.mio.tomahawk.run.IdeLaunchTerminal"/>
+    </extensions>
+</idea-plugin>
