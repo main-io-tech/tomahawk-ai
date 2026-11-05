@@ -15,6 +15,9 @@
         Reconhecimento, Plano de Voo, Pré-voo, Waypoints, Simulação de Rota, Lançamento e Avaliação de Danos), com o
         estado de cada uma lido dos artefatos e a próxima em destaque. Escreva a entrada e lance na aba ou no terminal
         da IDE, ou copie o comando para o chat do agente.</li>
+      <li><b>🛬 Extração:</b> no fim do Lançador, leve a missão para revisão: commit das alterações, push da branch e o
+        pull request no GitHub (para a <code>develop</code>, quando existe), com título e descrição tirados da spec e das
+        tarefas. Usa o Git e a conta do GitHub da IDE; com o PR já aberto, só envia os commits novos.</li>
       <li><b>🎯 Avaliação:</b> o que foi gerado em <code>specs/NNN-feature/</code>: histórias e requisitos da spec,
         pontos <code>[NEEDS CLARIFICATION]</code>, contexto técnico do plano, tarefas por fase e checklists, com um
         duplo clique para abrir o trecho.</li>
@@ -27,15 +30,21 @@
     <h3>0.1.0</h3>
     <ul>
       <li>Primeira versão: Lançador, Avaliação e Telemetria para o Spec Kit, com Cursor CLI e Claude Code.</li>
+      <li>Extração: commit, push e pull request no GitHub direto do Lançador.</li>
     </ul>
     ]]></change-notes>
 
     <depends>com.intellij.modules.platform</depends>
     <depends optional="true" config-file="tomahawk-terminal.xml">org.jetbrains.plugins.terminal</depends>
+    <depends optional="true" config-file="tomahawk-git.xml">Git4Idea</depends>
+    <depends optional="true" config-file="tomahawk-github.xml">org.jetbrains.plugins.github</depends>
 
     <extensionPoints>
         <extensionPoint name="launchTerminal"
                         interface="com.mio.tomahawk.run.LaunchTerminal"
+                        dynamic="true"/>
+        <extensionPoint name="pullRequestGateway"
+                        interface="com.mio.tomahawk.delivery.PullRequestGateway"
                         dynamic="true"/>
     </extensionPoints>
 

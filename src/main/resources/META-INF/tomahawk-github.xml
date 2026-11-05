@@ -1,0 +1,8 @@
+<!-- Com os plugins Git e GitHub, o Lançador faz o commit, o push e abre o pull request. -->
+<idea-plugin>
+    <depends>Git4Idea</depends>
+
+    <extensions defaultExtensionNs="com.mio.tomahawk">
+        <pullRequestGateway implementation="com.mio.tomahawk.delivery.github.GitHubPullRequests"/>
+    </extensions>
+</idea-plugin>

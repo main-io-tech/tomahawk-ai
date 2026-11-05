@@ -1,10 +1,14 @@
 package com.mio.tomahawk.ui.web
 
 import com.google.gson.JsonObject
+import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.mio.tomahawk.base.TomahawkToolWindowFactory
+import com.mio.tomahawk.delivery.DeliveryRequest
+import com.mio.tomahawk.delivery.PullRequestDraft
+import com.mio.tomahawk.delivery.PullRequestService
 import com.mio.tomahawk.run.LaunchTerminal
 import com.mio.tomahawk.run.Mission
 import com.mio.tomahawk.run.MissionRunner
@@ -13,6 +17,7 @@ import com.mio.tomahawk.run.TomahawkSettings
 import com.mio.tomahawk.speckit.FeatureReport
 import com.mio.tomahawk.speckit.SddStep
 import com.mio.tomahawk.speckit.Snapshot
+import com.mio.tomahawk.speckit.SpecKitLayout
 import com.mio.tomahawk.speckit.SpecKitService
 import com.mio.tomahawk.speckit.StepState
 import com.mio.tomahawk.speckit.StepStatus
@@ -37,9 +42,16 @@ class LauncherWeb(project: Project) : WebTab(project) {
     private val drafts = mutableMapOf<SddStep, String>()
     private val modes = mutableMapOf<SddStep, RunMode>()
     private val timer = Timer(TICK_MS) { runner.progress?.let { js("tmk.flight(${Flight.state(it)})") } }
+    private val pr = PullRequestService.getInstance(project)
+    /** O que o usuário escreveu no PR (branch, base, título, descrição, commit), por cima dos valores tirados da feature. */
+    private val prFields = mutableMapOf<String, String>()
+    private var prDraft = false
+    private var prFeature: Path? = null
+    private var prBusy = false
 
     init {
         project.messageBus.connect(this).subscribe(SpecKitService.CHANGED, SpecKitService.Listener { onSnapshot() })
+        project.messageBus.connect(this).subscribe(PullRequestService.CHANGED, PullRequestService.Listener { onDelivery() })
         project.messageBus.connect(this).subscribe(
             MissionRunner.RUNS,
             MissionRunner.Listener { ApplicationManager.getApplication().invokeLater({ updateTimer(); refresh() }, project.disposed) },
@@ -58,6 +70,18 @@ class LauncherWeb(project: Project) : WebTab(project) {
         )
         Disposer.register(this) { timer.stop() }
         updateTimer()
+        pr.refresh()
+        refresh()
+    }
+
+    /** Depois de uma entrega sem erro, os campos voltam aos valores da feature: o PR já está aberto. */
+    private fun onDelivery() {
+        val busy = pr.step != null
+        if (prBusy && !busy && pr.lastError == null) {
+            prFields.clear()
+            prDraft = false
+        }
+        prBusy = busy
         refresh()
     }
 
@@ -109,8 +133,133 @@ class LauncherWeb(project: Project) : WebTab(project) {
             append("<div class=\"stepper\">")
             statuses.forEach { append(step(it, it.step == current, s, feature, ready)) }
             append("</div>")
+            append(delivery(s, statuses))
         }
     }
+
+    /** A Extração: commit, push e pull request da feature ativa, quando o projeto está num repositório do GitHub. */
+    private fun delivery(s: Snapshot, statuses: List<StepStatus>): String = buildString {
+        if (pr.gateway == null) return@buildString
+        val state = pr.state
+        val local = state?.local
+        if (state != null && local == null) return@buildString
+        val feature = s.active
+        if (feature?.dir != prFeature) {
+            prFields.clear()
+            prFeature = feature?.dir
+        }
+        append(WebUi.section("Extração · Pull Request", WebUi.button("↻ Atualizar", "pr-refresh", "ghost", title = "Relê o repositório e o GitHub")))
+        append("<div class=\"card2\" data-form=\"pr\">")
+        append("<h3>🛬 Leve a missão para revisão</h3>")
+        append("<div class=\"desc\">Commit das alterações, push da branch e o pull request no GitHub, com a descrição tirada da spec e das tarefas.</div>")
+        if (local == null) {
+            append("<div class=\"status-line\">Lendo o repositório Git…</div></div>")
+            return@buildString
+        }
+        val remote = state.remote
+        val open = remote?.openPr
+        append("<div class=\"chips\" style=\"margin:0 0 10px\">")
+        append(WebUi.chip("Repositório", esc(local.repo)))
+        append(WebUi.chip("Branch", esc(local.branch ?: "sem branch")))
+        append(WebUi.chip("Alterações", "${local.changes.size}", if (local.changes.isNotEmpty()) "yellow" else null))
+        append(WebUi.chip("Sem push", "${local.ahead} commit(s)", if (local.ahead > 0) "blue" else null))
+        append(if (local.account != null) WebUi.chip("GitHub", "@" + esc(local.account), "green") else WebUi.chip("GitHub", "entrar", "yellow", cmd = "pr-login"))
+        append("</div>")
+
+        if (local.account == null) {
+            append(notice("warn", "🔑", "Entre na conta do GitHub da IDE para abrir pull requests em <b>${esc(local.host)}</b>.", WebUi.button("🔑 Entrar no GitHub", "pr-login")))
+            append("</div>")
+            return@buildString
+        }
+        state.problem?.let { append(notice("err", "⚠️", "O GitHub não respondeu: ${esc(it)}", WebUi.button("Tentar de novo", "pr-refresh"))) }
+        if (remote == null) {
+            append("<div class=\"status-line\">").append(if (pr.loading) "Consultando o GitHub…" else "Sem resposta do GitHub.").append("</div></div>")
+            return@buildString
+        }
+        val busy = pr.step
+        if (busy != null) append(notice("info", "🛰️", esc(busy)))
+        pr.lastError?.takeIf { busy == null }?.let { append(notice("err", "⚠️", esc(it))) }
+        if (open != null) {
+            val badge = if (open.draft) " <span class=\"tag\">rascunho</span>" else ""
+            append(notice("ok", "✅", "<b>PR #${open.number}</b> aberto: ${esc(open.title)} → <code>${esc(open.base)}</code>$badge",
+                WebUi.button("🌐 Abrir no GitHub", "pr-open", arg = open.url)))
+        }
+        if (statuses.none { it.step == SddStep.CONVERGE && it.state == StepState.DONE } && open == null) {
+            append("<div class=\"status-line\" style=\"margin:0 0 10px\">A Avaliação de Danos ainda não convergiu: dá para abrir o PR já, como rascunho, e completar depois.</div>")
+        }
+
+        val specTitle = feature?.spec?.file?.let { SpecKitLayout.read(it)?.lines() }?.let(PullRequestDraft::specTitle)
+        val branch = prFields["branch"] ?: PullRequestDraft.branch(feature, local.branch, remote.defaultBranch)
+        val base = prFields["base"] ?: PullRequestDraft.base(remote, branch)
+        val title = prFields["title"] ?: PullRequestDraft.title(feature, specTitle)
+        val commit = prFields["commit"] ?: title
+        val text = prFields["body"] ?: PullRequestDraft.body(feature, specTitle) { s.relative(it) }
+
+        append("<div class=\"cols\">")
+        append(input("Branch do PR", "branch", branch, if (branch != local.branch && branch.isNotEmpty()) "Criada agora, a partir de ${esc(local.branch ?: "HEAD")}." else null))
+        if (open == null) {
+            val bases = (listOf(remote.defaultBranch, "develop") + remote.branches.sorted()).distinct().filter { it in remote.branches && it != branch }
+            append("<div class=\"field\"><label>Base</label><select class=\"in\" name=\"base\" data-change=\"pr-base\">")
+            bases.forEach { append("<option value=\"${WebUi.attr(it)}\"").append(if (it == base) " selected" else "").append(">${esc(it)}</option>") }
+            append("</select></div>")
+        }
+        append("</div>")
+        if (local.changes.isNotEmpty()) {
+            append(input("Mensagem do commit", "commit", commit, null))
+            append("<details style=\"margin:-6px 0 12px\"><summary class=\"status-line\" style=\"cursor:pointer\">${local.changes.size} arquivo(s) no commit · fora tomahawk/ e .idea/</summary><div class=\"list\" style=\"margin-top:6px\">")
+            local.changes.take(MAX_FILES).forEach { append("<div class=\"li\"><span class=\"ac-file\">").append(esc(it)).append("</span></div>") }
+            if (local.changes.size > MAX_FILES) append("<div class=\"li meta\">e mais ${local.changes.size - MAX_FILES}…</div>")
+            append("</div></details>")
+        }
+        if (open == null) {
+            append(input("Título", "title", title, null))
+            append("<div class=\"field\"><label>Descrição</label><textarea class=\"in\" name=\"body\" data-draft=\"pr.body\" style=\"min-height:160px\">")
+            append(esc(text)).append("</textarea></div>")
+        }
+
+        append("<div class=\"st-tools\"><div class=\"row-btns\">")
+        if (open == null) {
+            append("<label class=\"status-line\" style=\"margin:0;display:inline-flex;gap:6px;align-items:center\"><input type=\"checkbox\" name=\"draft\" data-change=\"pr-draft\"")
+            append(if (prDraft) " checked" else "").append("> Abrir como rascunho</label>")
+        }
+        append("</div><div class=\"row-btns\">")
+        val label = when {
+            open != null && local.changes.isNotEmpty() -> "⬆️ Commitar e enviar ao PR #${open.number}"
+            open != null -> "⬆️ Enviar ao PR #${open.number}"
+            local.changes.isNotEmpty() -> "🚀 Commitar, enviar e abrir PR"
+            else -> "🚀 Enviar e abrir PR"
+        }
+        val why = when {
+            busy != null -> "Há uma entrega em andamento"
+            open != null && local.changes.isEmpty() && local.ahead == 0 && branch == local.branch -> "O PR já tem tudo: não há alterações nem commits sem push"
+            else -> null
+        }
+        append(WebUi.button(label, "pr", "primary big", enabled = why == null, title = why))
+        append("</div></div>")
+        append("<div class=\"status-line\">").append(plan(local.changes.size, branch, local.branch, local.remote, base, open?.number)).append("</div>")
+        append("</div>")
+    }
+
+    private fun plan(changes: Int, branch: String, current: String?, remote: String, base: String, open: Int?): String {
+        val steps = buildList {
+            if (branch.isNotEmpty() && branch != current) add("cria a branch <b>${esc(branch)}</b>")
+            if (changes > 0) add("commita $changes arquivo(s)")
+            add("envia <b>${esc(branch)}</b> para <b>${esc(remote)}</b>")
+            add(if (open != null) "atualiza o PR #$open" else "abre o PR para <b>${esc(base)}</b>")
+        }
+        return steps.joinToString(", ").replaceFirstChar { it.uppercase() } + "."
+    }
+
+    private fun input(label: String, name: String, value: String, hint: String?): String = buildString {
+        append("<div class=\"field\"><label>").append(label).append("</label>")
+        append("<input class=\"in\" name=\"$name\" data-draft=\"pr.$name\" value=\"").append(WebUi.attr(value)).append("\">")
+        hint?.let { append("<span class=\"hint\">").append(it).append("</span>") }
+        append("</div>")
+    }
+
+    private fun notice(kind: String, icon: String, html: String, action: String = ""): String =
+        "<div class=\"notice $kind\" style=\"margin:0 0 10px\"><span class=\"ni\">$icon</span><div class=\"nb\">$html" +
+            (if (action.isNotEmpty()) "<div>$action</div>" else "") + "</div></div>"
 
     private fun aiChip(ready: Boolean) =
         if (ready) WebUi.chip("IA", "${TomahawkSettings.provider.title} ✓", "green", cmd = "arsenal")
@@ -259,7 +408,30 @@ class LauncherWeb(project: Project) : WebTab(project) {
                 }
                 refresh(force = true)
             }
-            "draft" -> step?.let { drafts[it] = data.str("text").orEmpty() }
+            "draft" -> {
+                val key = data.str("arg").orEmpty()
+                if (key.startsWith("pr.")) prFields[key.removePrefix("pr.")] = data.str("text").orEmpty()
+                else step?.let { drafts[it] = data.str("text").orEmpty() }
+            }
+            "pr-base" -> data.str("value")?.let { prFields["base"] = it }
+            "pr-draft" -> prDraft = data.str("draft") == "true"
+            "pr-refresh" -> pr.refresh(remote = true, delayMs = 0)
+            "pr-login" -> pr.login()
+            "pr-open" -> data.str("arg")?.let(BrowserUtil::browse)
+            "pr" -> {
+                listOf("branch", "base", "title", "body", "commit").forEach { key -> data.str(key)?.let { prFields[key] = it } }
+                prDraft = data.str("draft") == "true"
+                pr.deliver(
+                    DeliveryRequest(
+                        branch = data.str("branch").orEmpty(),
+                        base = data.str("base") ?: pr.state?.remote?.openPr?.base.orEmpty(),
+                        commitMessage = data.str("commit").orEmpty(),
+                        title = data.str("title").orEmpty(),
+                        body = data.str("body").orEmpty(),
+                        draft = prDraft,
+                    ),
+                )
+            }
             "mode" -> {
                 val target = selected ?: return
                 RunMode.entries.firstOrNull { it.name == data.str("value") }?.let { modes[target] = it }
@@ -285,5 +457,6 @@ class LauncherWeb(project: Project) : WebTab(project) {
 
     private companion object {
         const val TICK_MS = 500
+        const val MAX_FILES = 40
     }
 }
