@@ -47,8 +47,8 @@ object DeliveryWriter {
     fun replyPrompt(contextFile: String, me: String, number: Int, branch: String, hasNotes: Boolean): String =
         "You are @$me, the author of the pull request #$number of this repository, and another developer commented on it. " +
             "The pull request, the whole conversation and the code under discussion are in the UTF-8 file $contextFile: read it first. " +
-            "The branch of the pull request is $branch and the local checkout may be another branch: read the files with git show $branch:path " +
-            "or in the working tree when you need more context. " +
+            "The branch of the pull request is $branch and the local checkout may be another branch: when you need more context, read the files " +
+            "with git show $branch:path, or in the working tree if you cannot run commands. " +
             "Do not modify any file and do not run commands that change the repository. " +
             "Write the reply of the author to the last comment of the conversation: answer the questions, explain the decisions with arguments, " +
             "agree and say what will be changed when the reviewer is right, or politely disagree and explain why. " +
@@ -82,6 +82,7 @@ object DeliveryWriter {
         val workDir = root.toString()
         val command = AgentCommand.headless(
             provider, launch.executable, prompt, launch.workspace(workDir), TomahawkSettings.model, AgentCommand.splitArgs(TomahawkSettings.extraArgs),
+            readOnly = true,
         )
         val output = ExecUtil.execAndGetOutput(launch.process(command, workDir, AgentVerifier.apiKeyEnv(provider)), TIMEOUT_MS)
         val result = output.stdoutLines.flatMap(AgentEvents::parse).filterIsInstance<AgentEvent.Result>().lastOrNull()

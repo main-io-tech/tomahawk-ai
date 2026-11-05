@@ -55,6 +55,18 @@ class RunTest {
     }
 
     @Test
+    fun `no modo so leitura o CLI nao ganha permissao para alterar nada, nem pelos argumentos extras`() {
+        val extra = listOf("--approve-mcps", "--force", "--yolo", "--permission-mode", "bypassPermissions", "--sandbox=disabled", "--dangerously-skip-permissions")
+        val cursor = AgentCommand.headless(AgentProvider.CURSOR, "agent", "x", "C:/p", null, extra, readOnly = true)
+        assertEquals(listOf("agent", "-p", "--output-format", "stream-json", "--trust", "--mode", "ask", "--workspace", "C:/p", "--approve-mcps", "x"), cursor)
+        val claude = AgentCommand.headless(AgentProvider.CLAUDE, "claude", "x", "C:/p", "sonnet", extra, readOnly = true)
+        assertEquals(
+            listOf("claude", "-p", "--output-format", "stream-json", "--verbose", "--allowedTools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--model", "sonnet", "--approve-mcps", "x"),
+            claude,
+        )
+    }
+
+    @Test
     fun `monta o comando do terminal com as variáveis da feature na sintaxe do shell`() {
         val env = mapOf("SPECIFY_FEATURE" to "001-x")
         assertEquals("\$env:SPECIFY_FEATURE='001-x'; & 'agent' 'go'", AgentCommand.terminal(AgentProvider.CURSOR, "agent", "go", null, emptyList(), ShellKind.POWERSHELL, env))

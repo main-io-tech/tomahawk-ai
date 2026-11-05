@@ -112,8 +112,9 @@ class TomahawkConfigurable : Configurable {
             .addLabeledComponent("Tempo máximo (min):", timeout)
             .addLabeledComponent("Argumentos extras:", extraArgs)
             .addComponentToRightColumn(small(
-                "Na aba, o Cursor roda com -p --trust --force e o Claude Code com -p --permission-mode bypassPermissions, como no despacho de " +
-                    "workflows do Spec Kit: os comandos rodam scripts e escrevem arquivos sem perguntar.",
+                "Missões na aba: o Cursor roda com -p --trust --force e o Claude Code com -p --permission-mode bypassPermissions, como no despacho de " +
+                    "workflows do Spec Kit: a IA roda scripts e escreve arquivos sem perguntar. No terminal da IDE, você aprova cada passo. " +
+                    "Textos (commit, PR, respostas do Rádio) e o teste rodam só leitura: Cursor em --mode ask, Claude Code em --permission-mode dontAsk.",
             ))
             .addLabeledComponent("Chave de API do Cursor:", cursorKey)
             .addComponentToRightColumn(small("Opcional: sem ela, vale o login do agent login. Fica no cofre de senhas da IDE."))

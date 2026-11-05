@@ -34,6 +34,7 @@ object TomahawkSettings {
     private const val TERMINAL_VERIFIED_AT_KEY = "Tomahawk.Agent.TerminalVerifiedAt"
     private const val AUTO_SETUP_KEY = "Tomahawk.Agent.AutoSetupTried"
     private const val SPECIFY_KEY = "Tomahawk.Specify.Executable"
+    private const val GUARDRAILS_KEY = "Tomahawk.Agent.Guardrails"
     private val cursorCredentials = CredentialAttributes(generateServiceName("Tomahawk IA", "Cursor API key"))
 
     const val DEFAULT_TIMEOUT_MINUTES = 30
@@ -88,6 +89,11 @@ object TomahawkSettings {
     var specifyExecutable: String?
         get() = props.getValue(SPECIFY_KEY)?.takeIf { it.isNotBlank() }
         set(value) = change { props.setValue(SPECIFY_KEY, value?.trim()?.takeIf { it.isNotEmpty() }) }
+
+    /** As proteções da máquina nas missões ([Guardrails] e [Checkpoints]); ligadas por padrão. */
+    var guardrails: Boolean
+        get() = props.getBoolean(GUARDRAILS_KEY, true)
+        set(value) = change { props.setValue(GUARDRAILS_KEY, value, true) }
 
     /** A configuração automática roda sozinha só na primeira vez; depois, só pelo botão. */
     var autoSetupTried: Boolean
@@ -179,6 +185,12 @@ object TomahawkSettings {
         configured?.let { path -> return Path.of(path).takeIf(Files::isRegularFile) }
         val home = System.getProperty("user.home")
         return find(listOf("specify"), listOf(File(home, ".local/bin")))
+    }
+
+    /** O `uv`, que instala o `specify`: no PATH ou onde o instalador da Astral o deixa. */
+    fun resolveUv(): Path? {
+        val home = System.getProperty("user.home")
+        return find(listOf("uv"), listOf(File(home, ".local/bin"), File(home, ".cargo/bin")))
     }
 
     private fun find(executables: List<String>, dirs: List<File>): Path? {

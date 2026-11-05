@@ -17,6 +17,7 @@ import com.mio.tomahawk.run.LaunchTerminal
 import com.mio.tomahawk.run.Mission
 import com.mio.tomahawk.run.MissionRunner
 import com.mio.tomahawk.run.RunMode
+import com.mio.tomahawk.run.SpecKitSetup
 import com.mio.tomahawk.run.TomahawkSettings
 import com.mio.tomahawk.speckit.FeatureReport
 import com.mio.tomahawk.speckit.SddStep
@@ -75,6 +76,10 @@ class LauncherWeb(project: Project) : WebTab(project) {
         ApplicationManager.getApplication().messageBus.connect(this).subscribe(
             TomahawkSettings.Listener.TOPIC,
             TomahawkSettings.Listener { ApplicationManager.getApplication().invokeLater({ refresh() }, project.disposed) },
+        )
+        ApplicationManager.getApplication().messageBus.connect(this).subscribe(
+            SpecKitSetup.Listener.TOPIC,
+            SpecKitSetup.Listener { ApplicationManager.getApplication().invokeLater({ refresh() }, project.disposed) },
         )
         Disposer.register(this) { timer.stop() }
         updateTimer()
@@ -349,9 +354,14 @@ class LauncherWeb(project: Project) : WebTab(project) {
         append("<p>Este projeto ainda não tem o <b>.specify/</b>. Inicialize o Spec Kit para instalar os comandos de SDD no agente escolhido (")
         append(esc(TomahawkSettings.provider.integration)).append(").</p>")
         append("<div class=\"cmdline\">specify init --here --integration ").append(esc(TomahawkSettings.provider.integration)).append("</div><div>")
-        append(WebUi.button("⚡ Inicializar Spec Kit", "init", "primary big"))
+        append(
+            WebUi.button(
+                "⚡ Inicializar Spec Kit", "init", "primary big", enabled = specify != null && SpecKitSetup.job == null,
+                title = if (specify == null) "Instale o Spec Kit nesta máquina primeiro" else "Roda specify init --here no terminal da IDE",
+            ),
+        )
         append("</div>")
-        if (specify == null) append("<div class=\"notice warn\"><span class=\"ni\">⚠️</span><div class=\"nb\">O <b>specify</b> não foi encontrado. Instale com <code>uv tool install specify-cli</code>.</div></div>")
+        append("<div style=\"text-align:left;max-width:640px;margin:0 auto\">").append(SpecKitWeb.machine(specify)).append("</div>")
         append("</div>")
     }
 
@@ -539,6 +549,12 @@ class LauncherWeb(project: Project) : WebTab(project) {
             "artifact" -> step?.let { s -> artifactOf(s, if (newFeature) null else service.snapshot.active)?.let { openArtifact(project, it) } }
             "open" -> data.str("arg")?.let { openArtifact(project, Path.of(it)) }
             "init" -> runner.initSpecKit()
+            "specify-install" -> SpecKitSetup.install(project)
+            "specify-upgrade" -> SpecKitSetup.upgrade(project)
+            "specify-recheck" -> {
+                SpecKitSetup.recheck()
+                service.refresh(0)
+            }
             "arsenal" -> TomahawkToolWindowFactory.showTab(project, TomahawkToolWindowFactory.ARSENAL)
             "radio" -> TomahawkToolWindowFactory.showTab(project, TomahawkToolWindowFactory.RADIO)
             "abort" -> runner.progress?.cancel()

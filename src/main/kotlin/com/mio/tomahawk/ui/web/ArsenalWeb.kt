@@ -6,13 +6,16 @@ import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.project.Project
 import com.mio.tomahawk.run.AgentAutoSetup
+import com.mio.tomahawk.run.AgentCommand
 import com.mio.tomahawk.run.AgentHost
 import com.mio.tomahawk.run.AgentLaunch
 import com.mio.tomahawk.run.AgentProvider
 import com.mio.tomahawk.run.AgentVerifier
+import com.mio.tomahawk.run.Guardrails
 import com.mio.tomahawk.run.LaunchTerminal
 import com.mio.tomahawk.run.MissionRunner
 import com.mio.tomahawk.run.RunMode
+import com.mio.tomahawk.run.SpecKitSetup
 import com.mio.tomahawk.run.TomahawkSettings
 import com.mio.tomahawk.speckit.SddStep
 import com.mio.tomahawk.speckit.SpecKitService
@@ -73,6 +76,10 @@ class ArsenalWeb(project: Project) : WebTab(project) {
             },
         )
         project.messageBus.connect(this).subscribe(SpecKitService.CHANGED, SpecKitService.Listener { refresh() })
+        ApplicationManager.getApplication().messageBus.connect(this).subscribe(
+            SpecKitSetup.Listener.TOPIC,
+            SpecKitSetup.Listener { ApplicationManager.getApplication().invokeLater({ refresh() }, project.disposed) },
+        )
         if (AgentLaunch.wslSupported) {
             ApplicationManager.getApplication().executeOnPooledThread {
                 val names = AgentLaunch.distributions()
@@ -111,6 +118,7 @@ class ArsenalWeb(project: Project) : WebTab(project) {
         append(cliCard(busy))
         append("</div><div>")
         append(runCard())
+        append(guardCard())
         append(specKitCard())
         append(capsCard(ready))
         append("</div></div>")
@@ -167,8 +175,13 @@ class ArsenalWeb(project: Project) : WebTab(project) {
             if (TomahawkSettings.hasCursorApiKey) append("<div>").append(WebUi.button("Remover chave salva", "clearKey", "ghost")).append("</div>")
             append("</div>")
         }
-        append("<div class=\"notice info\" style=\"margin:0 0 12px\"><span class=\"ni\">🔐</span><div class=\"nb\">Na aba, o Cursor roda com <code>--force --trust</code> e o Claude Code com ")
-        append("<code>--permission-mode bypassPermissions</code>, como no despacho de workflows do Spec Kit: os comandos rodam scripts e escrevem arquivos sem perguntar.</div></div>")
+        append("<div class=\"notice warn\" style=\"margin:0 0 12px\"><span class=\"ni\">🔐</span><div class=\"nb\">")
+        append("<b>Missões na aba:</b> o Cursor roda com <code>--force --trust</code> e o Claude Code com <code>--permission-mode bypassPermissions</code>, ")
+        append("como no despacho de workflows do Spec Kit: a IA roda scripts e escreve arquivos sem perguntar, com as permissões do seu usuário. ")
+        append("O cartão <b>Proteções</b> barra o que pode danificar a máquina e guarda um ponto de restauração. Para aprovar cada passo, lance no terminal da IDE.<br>")
+        append("<b>Textos</b> (commit, PR, respostas do Rádio) e o teste: só leitura, com o Cursor em <code>--mode ask</code> e o Claude Code em ")
+        append("<code>--permission-mode dontAsk</code> com <code>--allowedTools ${AgentCommand.READ_TOOLS}</code>. ")
+        append("Assim, um comentário malicioso num PR não dá à IA permissão para alterar arquivos.</div></div>")
         append("<div class=\"row-btns\">")
         append(WebUi.button(if (AgentVerifier.testing) "⏳ Testando…" else "✔ Salvar e testar", "save", "primary big", arg = "test", enabled = !busy))
         append(WebUi.button("Salvar", "save", enabled = !busy))
@@ -219,25 +232,79 @@ class ArsenalWeb(project: Project) : WebTab(project) {
         append("</div>")
     }
 
+    private fun guardCard(): String = buildString {
+        val on = TomahawkSettings.guardrails
+        val cursor = TomahawkSettings.provider == AgentProvider.CURSOR
+        append("<div class=\"card2\"><h3>🛡️ Proteções</h3><div class=\"desc\">O que impede a IA, rodando sozinha, de danificar a máquina ou perder o seu trabalho.</div>")
+        append("<div class=\"field\">").append(WebUi.seg("guard", listOf("on" to "🛡️ Ligadas", "off" to "Desligadas"), if (on) "on" else "off", send = "guard")).append("</div>")
+        if (!on) {
+            append("<div class=\"notice err\" style=\"margin:0 0 10px\"><span class=\"ni\">⚠️</span><div class=\"nb\">Com as proteções desligadas, a IA roda qualquer comando ")
+            append("com as permissões do seu usuário e as missões não têm ponto de restauração.</div></div>")
+        }
+        append("<ul class=\"caps\">")
+        listOf(
+            "<b>Barrado antes de rodar</b>: apagar pastas inteiras, formatar discos, desligar a máquina, pedir administrador, mudar o sistema, " +
+                "instalar programas, rodar script baixado da internet, <code>git push</code>/<code>reset --hard</code>/<code>clean</code>. " +
+                (if (cursor) "Fica no <code>.cursor/cli.json</code> do projeto." else "Vai no <code>--settings</code> do Claude Code, que também não escreve fora do projeto."),
+            "<b>Vigia</b>: o Tomahawk lê cada passo da IA e aborta a missão num comando perigoso, numa escrita fora do projeto ou dentro do <code>.git</code>, " +
+                "ou numa leitura de credenciais (<code>~/.ssh</code>, <code>~/.aws</code>…).",
+            "<b>Ponto de restauração</b>: antes de cada missão, o projeto inteiro vai para o Git (em <code>refs/tomahawk/</code>, sem mexer na sua branch), e dá para desfazer.",
+            "<b>Sem segredos</b>: tokens e chaves do ambiente (GitHub, nuvem, npm) não chegam ao processo da IA.",
+        ).forEach { text ->
+            append("<li><span class=\"ck ").append(if (on) "on\">✓" else "off\">○").append("</span><span>").append(text).append("</span></li>")
+        }
+        append("</ul><div class=\"row-btns\" style=\"margin-top:10px\">")
+        append(WebUi.button("↩ Desfazer a última missão", "undo", "ghost", enabled = runner.progress == null,
+            title = "Volta o projeto para o ponto de restauração da última missão, depois de mostrar o que mudou"))
+        append("</div><div class=\"status-line\">Nenhuma proteção substitui uma máquina isolada: para tarefas arriscadas, rode a IA num container, numa VM ou no WSL.</div>")
+        append("</div>")
+    }
+
     private fun specKitCard(): String = buildString {
         val s = service.snapshot
         val specify = TomahawkSettings.resolveSpecify()
-        append("<div class=\"card2\"><h3>🌱 Spec Kit</h3><div class=\"desc\">O CLI <code>specify</code> e os comandos instalados neste projeto.</div>")
+        val info = SpecKitSetup.infoFor(specify)
+        val installing = SpecKitSetup.job != null
+        val integration = TomahawkSettings.provider.integration
+        append("<div class=\"card2\"><h3>🌱 Spec Kit</h3><div class=\"desc\">O CLI <code>specify</code> nesta máquina e os comandos instalados neste projeto.</div>")
         append("<div class=\"chips\" style=\"margin:0 0 10px\">")
-        append(if (specify != null) WebUi.chip("specify", "✓ encontrado", "green") else WebUi.chip("specify", "não encontrado", "red"))
+        append(
+            when {
+                specify == null -> WebUi.chip("Máquina", "specify não instalado", "red")
+                info?.outdated == true -> WebUi.chip("Máquina", "specify v${esc(info.version ?: "?")} · nova v${esc(info.latest.orEmpty())}", "orange")
+                else -> WebUi.chip("Máquina", "specify ${info?.version?.let { "v" + esc(it) } ?: ""} ✓", "green")
+            },
+        )
         append(if (s.initialized) WebUi.chip("Projeto", "inicializado", "green") else WebUi.chip("Projeto", "sem .specify/", "yellow"))
         s.integration.key?.let { append(WebUi.chip("Integração", esc(it))) }
         if (s.initialized) append(WebUi.chip("Comandos", "${s.commands.size}/${SddStep.entries.size}", if (s.commands.size == SddStep.entries.size) "green" else "orange"))
         append("</div>")
         specify?.let { append("<div class=\"status-line\">").append(esc(it.toString())).append("</div>") }
-            ?: append("<div class=\"status-line bad\">Instale com: <code>uv tool install specify-cli</code></div>")
+        append(SpecKitWeb.machine(specify))
         val key = s.integration.key
-        if (s.initialized && key != null && key != TomahawkSettings.provider.integration) {
+        if (s.initialized && key != null && key != integration) {
             append("<div class=\"notice warn\"><span class=\"ni\">⚠️</span><div class=\"nb\">O projeto foi inicializado para <b>").append(esc(key))
-            append("</b>, mas a IA configurada é o <b>").append(esc(TomahawkSettings.provider.title)).append("</b>. Os comandos podem estar em outra pasta; ")
-            append("instale a integração com <code>specify integration install ").append(esc(TomahawkSettings.provider.integration)).append("</code>.</div></div>")
+            append("</b>, mas a IA configurada é o <b>").append(esc(TomahawkSettings.provider.title)).append("</b>, e os comandos dele podem não estar instalados.")
+            append("<div class=\"cmdline\" style=\"margin:8px 0 0\">specify integration install ").append(esc(integration)).append("</div><div class=\"row-btns\">")
+            append(WebUi.button("🔌 Instalar a integração ${esc(integration)}", "specify-integration", enabled = specify != null && !installing))
+            append("</div></div></div>")
         }
-        if (!s.initialized) append("<div style=\"margin-top:10px\">").append(WebUi.button("⚡ Inicializar Spec Kit", "init", "primary")).append("</div>")
+        if (!s.initialized) {
+            append("<div class=\"notice warn\"><span class=\"ni\">🛰️</span><div class=\"nb\">Este projeto ainda não tem o Spec Kit (a pasta <b>.specify/</b>).")
+            append("<div class=\"cmdline\" style=\"margin:8px 0 0\">specify init --here --integration ").append(esc(integration)).append("</div><div class=\"row-btns\">")
+            append(
+                WebUi.button(
+                    "⚡ Instalar no projeto", "init", "primary", enabled = specify != null && !installing,
+                    title = if (specify == null) "Instale o Spec Kit nesta máquina primeiro" else "Roda specify init --here no terminal da IDE",
+                ),
+            )
+            append("</div></div></div>")
+        }
+        if (specify != null && !installing) {
+            append("<div class=\"row-btns\" style=\"margin-top:10px\">")
+            append(WebUi.button("↻ Verificar de novo", "specify-recheck", "ghost", title = "Procura o specify de novo, relê a versão e o projeto"))
+            append("</div>")
+        }
         append("</div>")
     }
 
@@ -355,6 +422,22 @@ class ArsenalWeb(project: Project) : WebTab(project) {
                 }
             }
             "init" -> runner.initSpecKit()
+            "specify-install" -> SpecKitSetup.install(project)
+            "specify-upgrade" -> SpecKitSetup.upgrade(project)
+            "specify-recheck" -> {
+                SpecKitSetup.recheck()
+                service.refresh(0)
+            }
+            "specify-integration" -> SpecKitSetup.installIntegration(project)
+            "guard" -> {
+                val on = data.str("value") == "on"
+                TomahawkSettings.guardrails = on
+                service.root()?.let { root ->
+                    ApplicationManager.getApplication().executeOnPooledThread { runCatching { Guardrails.applyCursorConfig(root, on) } }
+                }
+                refresh(force = true)
+            }
+            "undo" -> runner.undo()
         }
     }
 }

@@ -31,6 +31,8 @@ class RadioWeb(project: Project) : WebTab(project) {
     private var filter = PENDING
     /** O que o usuário escreveu em cada conversa, pela chave dela. */
     private val replies = mutableMapOf<String, String>()
+    /** O que o usuário recolheu ou abriu, pela chave da dobra; o que não está aqui segue o padrão de cada bloco. */
+    private val folds = mutableMapOf<String, Boolean>()
 
     init {
         project.messageBus.connect(this).subscribe(PrRadarService.CHANGED, PrRadarService.Listener { refresh() })
@@ -74,7 +76,16 @@ class RadioWeb(project: Project) : WebTab(project) {
         append(WebUi.header("📻", "Rádio · Comentários dos seus PRs", title, subtitle, chips))
         radar.problem?.let { append(notice("err", "⚠️", "A última leitura falhou: ${esc(it)}", WebUi.button("Tentar de novo", "refresh"))) }
 
-        append(WebUi.section("Conversas", WebUi.button("↻ Atualizar", "refresh", "ghost") + WebUi.button("✓ Marcar tudo como lido", "seen-all", "ghost", enabled = unread > 0)))
+        append(DiffHunk.css())
+        append(
+            WebUi.section(
+                "Conversas",
+                WebUi.button("▸ Recolher tudo", "fold-all", "ghost", title = "Recolhe todas as conversas") +
+                    WebUi.button("▾ Expandir tudo", "unfold-all", "ghost", title = "Abre todas as conversas") +
+                    WebUi.button("↻ Atualizar", "refresh", "ghost") +
+                    WebUi.button("✓ Marcar tudo como lido", "seen-all", "ghost", enabled = unread > 0),
+            ),
+        )
         append("<div class=\"row-btns\" style=\"margin:0 0 12px\">")
         append(WebUi.seg("filter", listOf(PENDING to "⏳ Aguardando resposta", OTHERS to "👥 De outros devs", ALL to "Todas"), filter, send = "filter"))
         append("</div>")
@@ -97,8 +108,10 @@ class RadioWeb(project: Project) : WebTab(project) {
         }
         val unread = pr.threads.sumOf { radar.unread(it, snap.me) }
         val pending = pr.threads.count { it.awaitsReply(snap.me) }
-        append("<div class=\"card2 rpr\">")
-        append("<div class=\"rpr-head\"><div class=\"grow\"><div class=\"rpr-title\"><span class=\"num\">#${pr.ref.number}</span> ").append(esc(pr.ref.title))
+        val fold = prFold(pr)
+        append("<div class=\"card2 rpr").append(if (folded(fold, false)) " folded" else "").append("\" data-fold=\"").append(WebUi.attr(fold)).append("\">")
+        append("<div class=\"rpr-head\" data-fold-toggle title=\"Recolher ou expandir o PR\"><span class=\"fold-ic\"></span>")
+        append("<div class=\"grow\"><div class=\"rpr-title\"><span class=\"num\">#${pr.ref.number}</span> ").append(esc(pr.ref.title))
         if (pr.ref.draft) append(" <span class=\"tag\">rascunho</span>")
         append("</div><div class=\"chips\" style=\"margin-top:6px\">")
         append(WebUi.chip("Branch", "${esc(pr.head)} → ${esc(pr.ref.base)}"))
@@ -108,7 +121,7 @@ class RadioWeb(project: Project) : WebTab(project) {
         append("</div></div><div class=\"row-btns\">")
         append(WebUi.button("🌐 GitHub", "url", "ghost", arg = pr.ref.url))
         append(WebUi.button("✓ Lido", "seen-pr", "ghost", arg = "${pr.ref.number}", enabled = unread > 0))
-        append("</div></div>")
+        append("</div></div><div class=\"rpr-body\">")
         if (shown.isEmpty()) {
             val why = when (filter) {
                 PENDING -> "Nenhuma conversa esperando você neste PR."
@@ -118,7 +131,7 @@ class RadioWeb(project: Project) : WebTab(project) {
             append("<div class=\"status-line\">").append(why).append("</div>")
         }
         shown.forEach { append(thread(pr, it, snap.me)) }
-        append("</div>")
+        append("</div></div>")
     }
 
     private fun thread(pr: WatchedPr, thread: PrThread, me: String): String = buildString {
@@ -126,36 +139,56 @@ class RadioWeb(project: Project) : WebTab(project) {
         val unread = radar.unread(thread, me)
         val drafting = thread.key in radar.drafting
         val sending = thread.key in radar.sending
-        append("<div class=\"rthread").append(if (unread > 0) " new" else "").append(if (thread.resolved) " done" else "").append("\" data-form=\"reply\">")
-        append("<div class=\"rt-head\"><span class=\"rt-kind\">").append(thread.kind.icon).append(' ').append(thread.kind.label)
+        val fold = threadFold(thread)
+        val awaits = thread.awaitsReply(me)
+        append("<div class=\"rthread").append(if (unread > 0) " new" else "").append(if (awaits) " wait" else "").append(if (thread.resolved) " done" else "")
+        append(if (folded(fold, thread.resolved)) " folded" else "").append("\" data-form=\"reply\" data-fold=\"").append(WebUi.attr(fold)).append("\">")
+        append("<div class=\"rt-head\" data-fold-toggle title=\"Recolher ou expandir a conversa\"><span class=\"fold-ic\"></span>")
+        append("<span class=\"rt-kind\">").append(thread.kind.icon).append(' ').append(thread.kind.label)
         thread.reviewLabel?.let { append(": ").append(esc(it)) }
         append("</span>")
         thread.path?.let { path ->
-            val where = path + thread.line?.let { ":$it" }.orEmpty()
+            val where = path.substringAfterLast('/') + thread.line?.let { ":$it" }.orEmpty()
             append("<span class=\"st-cmd clickable\" data-cmd=\"file\" data-arg=\"").append(WebUi.attr(path)).append("\"")
             thread.line?.let { append(" data-line=\"$it\"") }
-            append(" title=\"Abrir no editor\">").append(esc(where)).append("</span>")
+            append(" title=\"").append(WebUi.attr(path)).append(" · abrir no editor\">").append(esc(where)).append("</span>")
         }
         append("<span class=\"tags\">")
         if (unread > 0) append("<span class=\"tag t-new\">$unread novo(s)</span>")
-        if (thread.awaitsReply(me)) append("<span class=\"tag t-wait\">aguardando resposta</span>")
-        if (thread.resolved) append("<span class=\"tag\">resolvida</span>")
+        if (awaits) append("<span class=\"tag t-wait\">aguardando resposta</span>")
+        if (thread.resolved) append("<span class=\"tag t-done\">✓ resolvida</span>")
         if (thread.outdated) append("<span class=\"tag\">desatualizada</span>")
-        append("</span><span class=\"grow\"></span><span class=\"rt-time\">").append(esc(date(thread.last.createdAt))).append("</span></div>")
-        thread.diffHunk?.takeIf { it.isNotBlank() && thread.kind == ThreadKind.CODE }?.let { append(hunk(it)) }
+        append("</span><span class=\"grow\"></span>")
+        if (thread.comments.size > 1) append("<span class=\"rt-count\" title=\"Comentários na conversa\">💬 ${thread.comments.size}</span>")
+        append("<span class=\"rt-time\">").append(esc(date(thread.last.createdAt))).append("</span></div>")
+        append("<div class=\"rt-peek\" data-fold-toggle>").append(avatar(thread.last.author, me))
+        append("<b>@").append(esc(thread.last.author)).append("</b><span class=\"txt\">").append(esc(peek(thread.last.body))).append("</span></div>")
+        append("<div class=\"rt-body\">")
+        thread.diffHunk?.takeIf { it.isNotBlank() && thread.kind == ThreadKind.CODE }?.let {
+            val key = "h|${thread.key}"
+            append(DiffHunk.html(project, it, thread.path, thread.line, key, folded(key, true), HUNK_LINES))
+        }
+        append("<div class=\"rcs\">")
         thread.comments.forEach { comment ->
             val mine = comment.author.equals(me, ignoreCase = true)
             val fresh = radar.isNew(comment, me)
             append("<div class=\"rc").append(if (mine) " me" else "").append(if (fresh) " new" else "").append("\">")
+            append(avatar(comment.author, me)).append("<div class=\"rc-main\">")
             append("<div class=\"rc-head\"><b>@").append(esc(comment.author)).append("</b>")
-            if (mine) append(" <span class=\"tag\">você</span>")
-            if (fresh) append(" <span class=\"tag t-new\">novo</span>")
-            append(" · ").append(esc(date(comment.createdAt))).append("</div>")
-            append("<div class=\"rc-body\">").append(if (comment.body.isBlank()) "<i>(sem texto)</i>" else ArtifactHtml.toHtml(comment.body)).append("</div></div>")
+            if (mine) append("<span class=\"tag\">você</span>")
+            if (fresh) append("<span class=\"tag t-new\">novo</span>")
+            append("<span class=\"grow\"></span><span class=\"rc-time\">").append(esc(date(comment.createdAt))).append("</span>")
+            comment.url.takeIf { it.isNotBlank() }?.let {
+                append("<span class=\"rc-link clickable\" data-cmd=\"url\" data-arg=\"").append(WebUi.attr(it)).append("\" title=\"Abrir o comentário no GitHub\">↗</span>")
+            }
+            append("</div>")
+            append("<div class=\"rc-body\">").append(if (comment.body.isBlank()) "<i>(sem texto)</i>" else ArtifactHtml.toHtml(comment.body)).append("</div></div></div>")
         }
+        append("</div>")
         radar.errors[thread.key]?.let { append(notice("err", "⚠️", esc(it))) }
         if (drafting) append(notice("info", "✨", "A IA está lendo a conversa e o código para escrever a resposta…"))
-        append("<div class=\"field\" style=\"margin:10px 0 8px\"><textarea class=\"in\" name=\"reply\" data-draft=\"reply|${WebUi.attr(thread.key)}\" ")
+        append("<div class=\"rt-reply\">")
+        append("<div class=\"field\" style=\"margin:0 0 8px\"><textarea class=\"in\" name=\"reply\" data-draft=\"reply|${WebUi.attr(thread.key)}\" ")
         append("placeholder=\"Escreva a resposta, ou anotações para a IA (por exemplo: concordo, vou corrigir no próximo commit)\" style=\"min-height:80px\">")
         append(esc(replies[thread.key].orEmpty())).append("</textarea></div>")
         append("<div class=\"st-tools\" style=\"margin-top:0\"><div class=\"row-btns\">")
@@ -172,22 +205,31 @@ class RadioWeb(project: Project) : WebTab(project) {
         append("</div><div class=\"row-btns\">")
         append(WebUi.button(if (sending) "⏳ Enviando…" else "📨 Enviar resposta", "send", "primary", arg = arg, enabled = !sending && !drafting,
             title = if (thread.kind == ThreadKind.CODE) "Responde na conversa da linha" else "Responde na conversa do PR, citando @${thread.last.author}"))
-        append("</div></div></div>")
+        append("</div></div></div></div></div>")
     }
 
-    /** As últimas linhas do trecho do diff, onde fica a linha comentada. */
-    private fun hunk(text: String): String = buildString {
-        val lines = text.lines().filterNot { it.startsWith("@@") }.takeLast(HUNK_LINES)
-        append("<pre class=\"hunk\">")
-        lines.forEach { line ->
-            val cls = when {
-                line.startsWith("+") -> "add"
-                line.startsWith("-") -> "del"
-                else -> ""
-            }
-            append("<span class=\"hl $cls\">").append(esc(line)).append("</span>\n")
+    private fun prFold(pr: WatchedPr) = "pr|${pr.ref.number}"
+
+    private fun threadFold(thread: PrThread) = "t|${thread.key}"
+
+    private fun folded(key: String, default: Boolean) = folds[key] ?: default
+
+    /** A inicial do autor num círculo com a cor dele; o do usuário leva o tom da página. */
+    private fun avatar(author: String, me: String): String {
+        val mine = author.equals(me, ignoreCase = true)
+        val hue = Math.floorMod(author.lowercase().hashCode(), 360)
+        val style = if (mine) "" else " style=\"--av:hsl($hue 55% 52%)\""
+        return "<span class=\"rc-av\"$style title=\"@${WebUi.attr(author)}\">${esc(author.take(1).uppercase())}</span>"
+    }
+
+    /** O começo do comentário numa linha, sem a marcação do Markdown. */
+    private fun peek(body: String): String {
+        val text = body.replace(Regex("```[\\s\\S]*?(```|$)"), " [código] ").replace(Regex("[`*_>#~]+"), "").replace(Regex("\\s+"), " ").trim()
+        return when {
+            text.isEmpty() -> "(sem texto)"
+            text.length > PEEK_CHARS -> text.take(PEEK_CHARS).trimEnd() + "…"
+            else -> text
         }
-        append("</pre>")
     }
 
     private fun date(iso: String): String =
@@ -208,6 +250,14 @@ class RadioWeb(project: Project) : WebTab(project) {
             "draft" -> data.str("arg")?.takeIf { it.startsWith("reply|") }?.let { replies[it.removePrefix("reply|")] = data.str("text").orEmpty() }
             "filter" -> {
                 filter = data.str("value") ?: PENDING
+                refresh(force = true)
+            }
+            "fold" -> data.str("arg")?.let { folds[it] = data.str("folded") == "true" }
+            "fold-all", "unfold-all" -> radar.snapshot?.prs?.let { prs ->
+                prs.forEach { pr ->
+                    folds[prFold(pr)] = false
+                    pr.threads.forEach { folds[threadFold(it)] = command == "fold-all" }
+                }
                 refresh(force = true)
             }
             "refresh" -> radar.refresh()
@@ -247,6 +297,7 @@ class RadioWeb(project: Project) : WebTab(project) {
         const val OTHERS = "others"
         const val ALL = "all"
         const val HUNK_LINES = 8
+        const val PEEK_CHARS = 140
         val DATE: DateTimeFormatter = DateTimeFormatter.ofPattern("dd/MM HH:mm")
         val TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
     }

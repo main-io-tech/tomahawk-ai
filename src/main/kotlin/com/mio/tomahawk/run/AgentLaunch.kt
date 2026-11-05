@@ -7,6 +7,7 @@ import com.intellij.execution.wsl.WSLDistribution
 import com.intellij.execution.wsl.WSLUtil
 import com.intellij.execution.wsl.WslDistributionManager
 import com.intellij.openapi.util.SystemInfo
+import com.intellij.util.EnvironmentUtil
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 
@@ -32,13 +33,20 @@ class AgentLaunch private constructor(val executable: String, val distro: String
     /** Um caminho desta máquina como o CLI o enxerga: igual, ou `/mnt/c/...` no WSL. */
     fun workspace(path: String): String = wsl?.getWslPath(Path.of(path)) ?: path
 
-    /** O processo de [command] (que começa pelo [executable]) em [workDir], com [env] no ambiente. */
-    fun process(command: List<String>, workDir: String, env: Map<String, String>): GeneralCommandLine {
+    /**
+     * O processo de [command] (que começa pelo [executable]) em [workDir], com [env] no ambiente. Com [scrub], nesta
+     * máquina, o processo não herda os segredos do ambiente ([Guardrails.environment]); o WSL já não herda o do Windows.
+     */
+    fun process(command: List<String>, workDir: String, env: Map<String, String>, scrub: Boolean = false): GeneralCommandLine {
         val line = GeneralCommandLine(command)
             .withWorkDirectory(workDir)
             .withCharset(StandardCharsets.UTF_8)
-            .withParentEnvironmentType(GeneralCommandLine.ParentEnvironmentType.CONSOLE)
-            .withEnvironment(env)
+        if (scrub && distro == null) {
+            line.withParentEnvironmentType(GeneralCommandLine.ParentEnvironmentType.NONE)
+                .withEnvironment(Guardrails.environment(EnvironmentUtil.getEnvironmentMap(), env))
+        } else {
+            line.withParentEnvironmentType(GeneralCommandLine.ParentEnvironmentType.CONSOLE).withEnvironment(env)
+        }
         val distribution = wsl ?: return line
         val options = WSLCommandLineOptions()
             .setExecuteCommandInShell(true)
@@ -59,9 +67,11 @@ class AgentLaunch private constructor(val executable: String, val distro: String
         workDir: String,
         env: Map<String, String> = emptyMap(),
         interactive: Boolean = true,
+        settings: Path? = null,
     ): String {
-        val distribution = distro ?: return AgentCommand.terminal(provider, executable, prompt, model, extraArgs, shell, env, interactive)
-        val inner = AgentCommand.terminal(provider, executable, prompt, model, extraArgs, ShellKind.POSIX, env, interactive)
+        val rules = settings?.let { workspace(it.toString()) }
+        val distribution = distro ?: return AgentCommand.terminal(provider, executable, prompt, model, extraArgs, shell, env, interactive, rules)
+        val inner = AgentCommand.terminal(provider, executable, prompt, model, extraArgs, ShellKind.POSIX, env, interactive, rules)
         return AgentCommand.wrapWsl(distribution, workspace(workDir), inner, shell)
     }
 

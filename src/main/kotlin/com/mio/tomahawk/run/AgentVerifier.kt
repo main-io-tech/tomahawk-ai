@@ -47,7 +47,7 @@ object AgentVerifier {
             val workspace = System.getProperty("user.home")
             val env = apiKeyEnv(provider)
             val outcome = runCatching {
-                val command = AgentCommand.headless(provider, launch.executable, "Responda apenas OK", launch.workspace(workspace), model, extra)
+                val command = AgentCommand.headless(provider, launch.executable, "Responda apenas OK", launch.workspace(workspace), model, extra, readOnly = true)
                 ExecUtil.execAndGetOutput(launch.process(command, workspace, env), TIMEOUT_MS)
             }.fold(
                 onSuccess = { output ->

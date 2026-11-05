@@ -61,23 +61,61 @@ object AgentCommand {
     /**
      * O comando sem janela, com a saída em `stream-json` para o Tomahawk acompanhar. Os comandos do Spec Kit rodam
      * scripts e escrevem arquivos, então o CLI recebe permissão para agir sem perguntar, como no despacho de
-     * workflows do próprio Spec Kit.
+     * workflows do próprio Spec Kit. Com [readOnly], para quando a IA só escreve um texto (o commit, o PR, a resposta
+     * a um comentário de outra pessoa), o CLI só lê: o Cursor no modo `ask` e sem `--force`, o Claude Code só com as
+     * ferramentas de leitura. Aí os argumentos extras que liberariam tudo ficam de fora. [settings] é o arquivo com as
+     * regras de proteção do Claude Code ([Guardrails]); no Cursor elas ficam no `.cursor/cli.json` do projeto.
      */
-    fun headless(provider: AgentProvider, executable: String, prompt: String, workspace: String, model: String?, extraArgs: List<String>): List<String> {
+    fun headless(
+        provider: AgentProvider,
+        executable: String,
+        prompt: String,
+        workspace: String,
+        model: String?,
+        extraArgs: List<String>,
+        readOnly: Boolean = false,
+        settings: String? = null,
+    ): List<String> {
         val chosenModel = model?.trim()?.takeIf { it.isNotEmpty() }
         val text = oneLine(prompt)
+        val extra = if (readOnly) withoutBypass(extraArgs) else extraArgs
         return when (provider) {
             AgentProvider.CURSOR -> buildList {
-                addAll(listOf(executable, "-p", "--output-format", "stream-json", "--trust", "--force", "--workspace", workspace))
+                add(executable)
+                addAll(listOf("-p", "--output-format", "stream-json", "--trust"))
+                addAll(if (readOnly) listOf("--mode", "ask") else listOf("--force"))
+                addAll(listOf("--workspace", workspace))
                 chosenModel?.let { addAll(listOf("--model", it)) }
-                addAll(extraArgs)
+                addAll(extra)
                 add(text)
             }
             AgentProvider.CLAUDE -> buildList {
-                addAll(listOf(executable, "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"))
+                addAll(listOf(executable, "-p", "--output-format", "stream-json", "--verbose"))
+                addAll(if (readOnly) listOf("--allowedTools", READ_TOOLS, "--permission-mode", "dontAsk") else listOf("--permission-mode", "bypassPermissions"))
+                settings?.let { addAll(listOf("--settings", it)) }
                 chosenModel?.let { addAll(listOf("--model", it)) }
-                addAll(extraArgs)
+                addAll(extra)
                 add(text)
+            }
+        }
+    }
+
+    /** As ferramentas do Claude Code no modo só leitura; `dontAsk` nega as outras sem perguntar. */
+    const val READ_TOOLS = "Read,Grep,Glob"
+
+    private val BYPASS_FLAGS = setOf("-f", "--force", "--yolo", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions")
+    private val VALUED_FLAGS = setOf("--permission-mode", "--mode", "--sandbox", "--allowedTools", "--allowed-tools")
+
+    /** [args] sem as opções que mudam as permissões, que o modo só leitura define. */
+    fun withoutBypass(args: List<String>): List<String> = buildList {
+        var skipValue = false
+        for (arg in args) {
+            when {
+                skipValue -> skipValue = false
+                arg in BYPASS_FLAGS -> Unit
+                arg in VALUED_FLAGS -> skipValue = true
+                VALUED_FLAGS.any { arg.startsWith("$it=") } -> Unit
+                else -> add(arg)
             }
         }
     }
@@ -95,6 +133,7 @@ object AgentCommand {
         shell: ShellKind,
         env: Map<String, String> = emptyMap(),
         interactive: Boolean = true,
+        settings: String? = null,
     ): String {
         val args = buildList {
             if (!interactive) {
@@ -103,6 +142,7 @@ object AgentCommand {
                     AgentProvider.CLAUDE -> addAll(listOf("-p", "--permission-mode", "bypassPermissions"))
                 }
             }
+            if (provider == AgentProvider.CLAUDE) settings?.let { addAll(listOf("--settings", it)) }
             model?.trim()?.takeIf { it.isNotEmpty() }?.let { addAll(listOf("--model", it)) }
             addAll(extraArgs)
             add(oneLine(prompt))
@@ -200,7 +240,7 @@ object AgentEvents {
     private fun claudeTool(block: JsonObject): AgentEvent.Tool {
         val name = block.str("name").orEmpty()
         val input = block.getAsJsonObject("input")
-        val target = input?.let { it.str("file_path") ?: it.str("path") ?: it.str("pattern") ?: it.str("command")?.take(80) ?: it.str("description") }
+        val target = input?.let { it.str("file_path") ?: it.str("path") ?: it.str("pattern") ?: it.str("command") ?: it.str("description") }
         val kind = when (name) {
             "Read" -> "read"
             "Write" -> "write"
@@ -222,7 +262,7 @@ object AgentEvents {
             ?: return null
         val kind = name.removeSuffix("ToolCall").ifEmpty { name }.lowercase()
         val args = (body as? JsonObject)?.getAsJsonObject("args")
-        val target = args?.let { it.str("path") ?: it.str("file_path") ?: it.str("filePath") ?: it.str("pattern") ?: it.str("command")?.take(80) }
+        val target = args?.let { it.str("path") ?: it.str("file_path") ?: it.str("filePath") ?: it.str("pattern") ?: it.str("command") }
         return AgentEvent.Tool(if (kind == "multiedit") "edit" else kind, target)
     }
 

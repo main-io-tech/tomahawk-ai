@@ -28,6 +28,7 @@ import java.awt.datatransfer.StringSelection
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Dispara as etapas do Spec Kit pelo CLI de IA configurado, uma por vez por projeto. Na aba, o andamento fica em
@@ -95,16 +96,105 @@ class MissionRunner(private val project: Project) {
         latest = current
         project.messageBus.syncPublisher(RUNS).changed()
         ApplicationManager.getApplication().executeOnPooledThread {
+            var point: Checkpoints.Point? = null
             val entry = try {
-                execute(current, launch, prompt, env + AgentVerifier.apiKeyEnv(provider), extra, root)
+                current.step = "Pré-voo: preparando as proteções"
+                val guard = guard(root, runName, mission, provider) { current.log(LogKind.INFO, it) }
+                point = guard.point
+                execute(current, launch, prompt, env + AgentVerifier.apiKeyEnv(provider), extra, root, guard.settings)
             } catch (e: Throwable) {
                 LOG.warn("A missão falhou", e)
                 failure(current, prompt, e.message ?: "A execução não terminou.")
             }
             val file = runCatching { RunStore.writeRun(root, runName, Transcript.render(entry)) }.getOrNull()
-            ApplicationManager.getApplication().invokeLater({ finish(entry, file) }, project.disposed)
+            ApplicationManager.getApplication().invokeLater({ finish(entry, file, point) }, project.disposed)
         }
         return true
+    }
+
+    private class Guard(val settings: Path?, val point: Checkpoints.Point?)
+
+    /**
+     * As proteções antes da missão, fora da EDT: as regras do CLI (o `.cursor/cli.json` do projeto ou o arquivo do
+     * `--settings` do Claude Code) e o ponto de restauração no Git. Desligadas, as regras do Tomahawk saem do Cursor.
+     */
+    private fun guard(root: Path, runName: String, mission: Mission, provider: AgentProvider, log: (String) -> Unit): Guard {
+        if (!Guardrails.enabled) {
+            runCatching { Guardrails.applyCursorConfig(root, on = false) }
+            log("Proteções desligadas no Arsenal: a IA roda sem as regras do Tomahawk e sem ponto de restauração")
+            return Guard(null, null)
+        }
+        var settings: Path? = null
+        when (provider) {
+            AgentProvider.CURSOR -> runCatching { Guardrails.applyCursorConfig(root) }
+                .onSuccess { log("Proteções: comandos perigosos barrados no .cursor/cli.json") }
+                .onFailure { LOG.warn("Não deu para gravar o .cursor/cli.json", it); log("Não deu para gravar as regras no .cursor/cli.json: ${it.message}") }
+            AgentProvider.CLAUDE -> settings = runCatching { Guardrails.writeClaudeSettings(root) }
+                .onSuccess { log("Proteções: comandos perigosos e escrita fora do projeto barrados no Claude Code") }
+                .onFailure { LOG.warn("Não deu para gravar as regras do Claude Code", it) }
+                .getOrNull()
+        }
+        val label = mission.step.codename + mission.feature?.let { " em ${it.substringAfterLast('/')}" }.orEmpty()
+        val point = runCatching { Checkpoints.create(root, runName, label) }.getOrNull()
+        log(if (point != null) "Ponto de restauração criado: dá para desfazer o que esta missão mudar" else "Sem ponto de restauração: o projeto não é um repositório Git ou o Git falhou")
+        return Guard(settings, point)
+    }
+
+    /**
+     * Volta o projeto para antes de uma missão ([point], ou a última), depois de mostrar o que mudou desde lá. Não
+     * roda com uma missão em voo.
+     */
+    fun undo(point: Checkpoints.Point? = null) {
+        val root = SpecKitService.getInstance(project).root() ?: return
+        if (progress != null) {
+            notify("Missão em voo", "Espere a missão terminar ou aborte na Telemetria antes de desfazer.", NotificationType.WARNING)
+            return
+        }
+        FileDocumentManager.getInstance().saveAllDocuments()
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val target = point ?: Checkpoints.latest(root)
+            val changes = target?.let { Checkpoints.changes(root, it) }
+            ApplicationManager.getApplication().invokeLater({
+                when {
+                    target == null -> notify("Nada para desfazer", "Nenhum ponto de restauração neste projeto: as missões só ganham um quando o projeto é um repositório Git.", NotificationType.INFORMATION)
+                    changes == null -> notify("Não deu para comparar", "O Git não conseguiu comparar o projeto com o ponto de antes de ${target.label}.", NotificationType.ERROR)
+                    changes.isEmpty() -> notify("Nada para desfazer", "O projeto está igual a antes de ${target.label}.", NotificationType.INFORMATION)
+                    else -> confirmUndo(root, target, changes)
+                }
+            }, project.disposed)
+        }
+    }
+
+    private fun confirmUndo(root: Path, point: Checkpoints.Point, changes: List<String>) {
+        val shown = changes.take(15).joinToString("\n") { "  • $it" } + if (changes.size > 15) "\n  … e mais ${changes.size - 15}" else ""
+        val answer = Messages.showOkCancelDialog(
+            project,
+            "Voltar o projeto para antes de ${point.label}? ${changes.size} arquivo(s) mudaram desde então:\n\n$shown\n\n" +
+                "Os alterados voltam como eram e os criados depois são apagados. O estado de agora fica guardado no Git, para dar para voltar atrás.",
+            "Desfazer a Missão",
+            "Desfazer",
+            Messages.getCancelButton(),
+            Messages.getWarningIcon(),
+        )
+        if (answer != Messages.OK) return
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = runCatching { Checkpoints.restore(root, point) }
+            ApplicationManager.getApplication().invokeLater({
+                LocalFileSystem.getInstance().refreshAndFindFileByNioFile(root)?.let { VfsUtil.markDirtyAndRefresh(true, true, true, it) }
+                SpecKitService.getInstance(project).refresh()
+                result.fold(
+                    onSuccess = { undo ->
+                        notify(
+                            "Missão desfeita",
+                            "O projeto voltou para antes de ${point.label}: ${undo.restored} arquivo(s) restaurado(s), ${undo.removed} apagado(s). " +
+                                "O estado anterior ficou em ${undo.safety?.ref}.",
+                            NotificationType.INFORMATION,
+                        )
+                    },
+                    onFailure = { notify("Não deu para desfazer", it.message ?: it.javaClass.simpleName, NotificationType.ERROR) },
+                )
+            }, project.disposed)
+        }
     }
 
     /** O comando como o usuário colaria no chat do agente, para rodar fora do Tomahawk. */
@@ -177,8 +267,9 @@ class MissionRunner(private val project: Project) {
         runName: String,
     ) {
         ApplicationManager.getApplication().executeOnPooledThread {
+            val guard = guard(root, runName, mission, provider) {}
             val shell = ShellKind.of(terminal.shellPath(project), SystemInfo.isWindows)
-            val command = launch.terminal(provider, prompt, TomahawkSettings.model, extra, shell, root.toString(), env)
+            val command = launch.terminal(provider, prompt, TomahawkSettings.model, extra, shell, root.toString(), env, settings = guard.settings)
             var error: Throwable? = null
             ApplicationManager.getApplication().invokeAndWait({
                 error = runCatching { terminal.run(project, root.toString(), "Tomahawk: ${mission.step.codename}", command) }.exceptionOrNull()
@@ -211,12 +302,25 @@ class MissionRunner(private val project: Project) {
         }
     }
 
-    private fun execute(state: MissionProgress, launch: AgentLaunch, prompt: String, env: Map<String, String>, extra: List<String>, root: Path): Transcript.Entry {
+    private fun execute(
+        state: MissionProgress,
+        launch: AgentLaunch,
+        prompt: String,
+        env: Map<String, String>,
+        extra: List<String>,
+        root: Path,
+        settings: Path?,
+    ): Transcript.Entry {
         val started = System.nanoTime()
         val timeout = TomahawkSettings.timeoutMinutes
         val provider = state.provider
         val executable = launch.description
-        val command = AgentCommand.headless(provider, launch.executable, prompt, launch.workspace(root.toString()), TomahawkSettings.model, extra)
+        val workspace = launch.workspace(root.toString())
+        val guarded = Guardrails.enabled
+        val command = AgentCommand.headless(
+            provider, launch.executable, prompt, workspace, TomahawkSettings.model, extra, settings = settings?.let { launch.workspace(it.toString()) },
+        )
+        val blocked = AtomicReference<String?>(null)
         val text = StringBuilder()
         var answer: String? = null
         var failed = false
@@ -229,7 +333,7 @@ class MissionRunner(private val project: Project) {
         state.step = "Ignição: iniciando o ${provider.title}"
         state.log(LogKind.INFO, "Lançando ${state.invocation} com o ${provider.title}")
         try {
-            val process = launch.process(command, root.toString(), env).createProcess()
+            val process = launch.process(command, root.toString(), env, scrub = guarded).createProcess()
             process.outputStream.close()
             val errors = Thread {
                 process.errorStream.bufferedReader(StandardCharsets.UTF_8).forEachLine { line ->
@@ -253,7 +357,12 @@ class MissionRunner(private val project: Project) {
                                 state.log(LogKind.TEXT, event.text.trim())
                             }
                             is AgentEvent.Tool -> {
-                                val target = event.target?.let { if (event.kind == "shell") it else shortPath(it) }
+                                if (guarded) {
+                                    Guardrails.verdict(event.kind, event.target, workspace)?.let { why ->
+                                        if (blocked.compareAndSet(null, why)) state.log(LogKind.ERROR, "🛡️ Proteção: $why. A missão foi abortada.")
+                                    }
+                                }
+                                val target = event.target?.let { if (event.kind == "shell") it.take(120) else shortPath(it) }
                                 val what = listOfNotNull(TOOL_LABELS[event.kind] ?: event.kind, target).joinToString(" ")
                                 steps += what
                                 state.advance(what)
@@ -275,7 +384,13 @@ class MissionRunner(private val project: Project) {
                     }
                 }
             }.apply { isDaemon = true; start() }
-            while (!process.waitFor(200, TimeUnit.MILLISECONDS)) {
+            while (!process.waitFor(100, TimeUnit.MILLISECONDS)) {
+                blocked.get()?.let { why ->
+                    error = "Abortada pela proteção do Tomahawk: $why."
+                    process.descendants().forEach { it.destroyForcibly() }
+                    process.destroyForcibly()
+                }
+                if (error != null) break
                 if (state.cancelled) {
                     cancelled = true
                     process.descendants().forEach { it.destroyForcibly() }
@@ -291,6 +406,7 @@ class MissionRunner(private val project: Project) {
             }
             reader.join(2_000)
             errors.join(1_000)
+            if (error == null) blocked.get()?.let { error = "Abortada pela proteção do Tomahawk: $it." }
             if (!cancelled && error == null && process.exitValue() != 0) {
                 error = synchronized(stderr) { stderr.toString() }.lines().lastOrNull { it.isNotBlank() }
                     ?: "O ${provider.title} terminou com o código ${process.exitValue()}."
@@ -334,7 +450,7 @@ class MissionRunner(private val project: Project) {
         state.mission.arguments, prompt, emptyList(), emptyList(), "", "", emptyList(),
     )
 
-    private fun finish(entry: Transcript.Entry, file: Path?) {
+    private fun finish(entry: Transcript.Entry, file: Path?, point: Checkpoints.Point?) {
         progress = null
         val base = SpecKitService.getInstance(project).root()?.let { LocalFileSystem.getInstance().refreshAndFindFileByNioFile(it) }
         if (base != null) VfsUtil.markDirtyAndRefresh(true, true, true, base)
@@ -350,7 +466,10 @@ class MissionRunner(private val project: Project) {
             if (entry.files.isNotEmpty()) append("${entry.files.size} arquivo(s) alterado(s). ")
             append(entry.answer.lineSequence().firstOrNull { it.isNotBlank() }?.take(240).orEmpty())
         }.trim().ifEmpty { "Sem resposta." }
-        notify(title, summary, if (entry.status == RunStatus.OK) NotificationType.INFORMATION else NotificationType.WARNING, file, evaluate = entry.status == RunStatus.OK)
+        notify(
+            title, summary, if (entry.status == RunStatus.OK) NotificationType.INFORMATION else NotificationType.WARNING, file,
+            evaluate = entry.status == RunStatus.OK, restorePoint = point,
+        )
     }
 
     fun open(path: Path) = openArtifact(project, path)
@@ -374,7 +493,14 @@ class MissionRunner(private val project: Project) {
             .notify(project)
     }
 
-    private fun notify(title: String, content: String, type: NotificationType, transcript: Path? = null, evaluate: Boolean = false) {
+    private fun notify(
+        title: String,
+        content: String,
+        type: NotificationType,
+        transcript: Path? = null,
+        evaluate: Boolean = false,
+        restorePoint: Checkpoints.Point? = null,
+    ) {
         val notification = NotificationGroupManager.getInstance().getNotificationGroup(NOTIFICATION_GROUP)
             .createNotification(title, escape(content), type)
             .setIcon(TomahawkIcons.lancador)
@@ -384,6 +510,7 @@ class MissionRunner(private val project: Project) {
                 TomahawkToolWindowFactory.showTab(project, TomahawkToolWindowFactory.EVALUATION)
             })
         }
+        restorePoint?.let { point -> notification.addAction(NotificationAction.createSimple("Desfazer a missão") { undo(point) }) }
         notification.notify(project)
     }
 
