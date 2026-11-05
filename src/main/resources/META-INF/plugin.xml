@@ -15,9 +15,13 @@
         Reconhecimento, Plano de Voo, Pré-voo, Waypoints, Simulação de Rota, Lançamento e Avaliação de Danos), com o
         estado de cada uma lido dos artefatos e a próxima em destaque. Escreva a entrada e lance na aba ou no terminal
         da IDE, ou copie o comando para o chat do agente.</li>
-      <li><b>🛬 Extração:</b> no fim do Lançador, leve a missão para revisão: commit das alterações, push da branch e o
-        pull request no GitHub (para a <code>develop</code>, quando existe), com título e descrição tirados da spec e das
-        tarefas. Usa o Git e a conta do GitHub da IDE; com o PR já aberto, só envia os commits novos.</li>
+      <li><b>🛬 Extração:</b> no fim do Lançador, leve a missão para revisão: só o commit, o commit e o push da branch ou
+        tudo isso e o pull request no GitHub (para a <code>develop</code>, quando existe). A mensagem do commit, com título e
+        corpo, e o texto do PR saem da spec e das tarefas, ou a IA do Arsenal escreve a partir do diff. Usa o Git e a conta
+        do GitHub da IDE; com o PR já aberto, só envia os commits novos.</li>
+      <li><b>📻 Rádio:</b> vigia os seus PRs abertos e avisa quando outra pessoa comenta. Mostra as conversas de código
+        (com o trecho do diff), da conversa geral e das revisões, com o que é novo e o que aguarda resposta, e a IA do
+        Arsenal escreve a resposta a partir da conversa e do código, para você revisar e enviar ao PR.</li>
       <li><b>🎯 Avaliação:</b> o que foi gerado em <code>specs/NNN-feature/</code>: histórias e requisitos da spec,
         pontos <code>[NEEDS CLARIFICATION]</code>, contexto técnico do plano, tarefas por fase e checklists, com um
         duplo clique para abrir o trecho.</li>

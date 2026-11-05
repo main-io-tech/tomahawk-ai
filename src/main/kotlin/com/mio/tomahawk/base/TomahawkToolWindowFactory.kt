@@ -27,7 +27,10 @@ import com.mio.tomahawk.speckit.SddStep
 import com.mio.tomahawk.ui.ArsenalFallback
 import com.mio.tomahawk.ui.web.ArsenalWeb
 import com.mio.tomahawk.ui.web.EvaluationWeb
+import com.mio.tomahawk.delivery.PullRequestGateway
+import com.mio.tomahawk.ui.RadioFallback
 import com.mio.tomahawk.ui.web.LauncherWeb
+import com.mio.tomahawk.ui.web.RadioWeb
 import com.mio.tomahawk.ui.web.TelemetryWeb
 import com.mio.tomahawk.ui.web.WebTab
 import java.awt.BorderLayout
@@ -48,6 +51,11 @@ class TomahawkToolWindowFactory : ToolWindowFactory, DumbAware {
         }
         add(toolWindow, TELEMETRY, TomahawkIcons.telemetria, "Monitora as missões: a execução em voo, o log ao vivo e o histórico") {
             if (web) TelemetryWeb(project) else TelemetryPanel(project)
+        }
+        if (PullRequestGateway.available() != null) {
+            add(toolWindow, RADIO, TomahawkIcons.radio, "Os comentários dos seus PRs no GitHub, com a resposta escrita pela IA") {
+                if (web) RadioWeb(project) else RadioFallback(project)
+            }
         }
         add(toolWindow, ARSENAL, TomahawkIcons.arsenal, "A IA: qual CLI usar, a configuração automática, o teste da integração e onde lançar") {
             if (web) ArsenalWeb(project) else ArsenalFallback(project)
@@ -96,6 +104,7 @@ class TomahawkToolWindowFactory : ToolWindowFactory, DumbAware {
         const val LAUNCHER = "Lançador"
         const val EVALUATION = "Avaliação"
         const val TELEMETRY = "Telemetria"
+        const val RADIO = "Rádio"
         const val ARSENAL = "Arsenal"
         private val LOG = logger<TomahawkToolWindowFactory>()
 

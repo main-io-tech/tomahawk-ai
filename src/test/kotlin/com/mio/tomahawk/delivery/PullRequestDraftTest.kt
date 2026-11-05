@@ -93,6 +93,29 @@ class PullRequestDraftTest {
     }
 
     @Test
+    fun `respostas da IA viram mensagem do commit e titulo e descricao do PR`() {
+        val commit = "```text\nfeat: adiciona a Extracao\n\n- commit e push\n```"
+        assertEquals("feat: adiciona a Extracao\n\n- commit e push", DeliveryWriter.clean(commit))
+
+        val (title, body) = DeliveryWriter.pullRequest("\n**Título:** feat: Extração no Lançador\n\n## Resumo\nCommit, push e PR.\n")
+        assertEquals("feat: Extração no Lançador", title)
+        assertEquals("## Resumo\nCommit, push e PR.", body)
+
+        val (plain, rest) = DeliveryWriter.pullRequest("```markdown\nfix: corrige o push\n\nCorpo\n```")
+        assertEquals("fix: corrige o push", plain)
+        assertEquals("Corpo", rest)
+        assertEquals("" to "", DeliveryWriter.pullRequest("  "))
+    }
+
+    @Test
+    fun `prompts mandam ler o contexto e nao alterar nada`() {
+        val commit = DeliveryWriter.commitPrompt("tomahawk/pedidos/x.md")
+        assertTrue("tomahawk/pedidos/x.md" in commit && "Do not modify any file" in commit && "Conventional Commits" in commit)
+        val pr = DeliveryWriter.pullRequestPrompt("tomahawk/pedidos/y.md", "001-x", "develop", "specs/001-x")
+        assertTrue("from the branch 001-x into develop" in pr && "specs/001-x" in pr && "Como testar" in pr)
+    }
+
+    @Test
     fun `erros do GitHub viram o que fazer`() {
         val draft = GitHubClient.errorMessage(422, """{"message":"Validation Failed","errors":[{"message":"Draft pull requests are not supported in this repository."}]}""")
         assertTrue(draft, "Desmarque Rascunho" in draft)

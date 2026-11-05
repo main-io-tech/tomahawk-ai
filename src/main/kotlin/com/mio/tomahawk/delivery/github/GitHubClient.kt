@@ -4,8 +4,12 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.google.gson.JsonPrimitive
 import com.mio.tomahawk.delivery.DeliveryException
+import com.mio.tomahawk.delivery.PrComment
+import com.mio.tomahawk.delivery.PrThread
 import com.mio.tomahawk.delivery.PullRequestRef
+import com.mio.tomahawk.delivery.WatchedPr
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -15,7 +19,7 @@ import java.nio.charset.StandardCharsets
 import java.time.Duration
 
 /** A API REST do GitHub com o token da conta da IDE, só no que o PR precisa. Faz rede de forma síncrona: fora da EDT. */
-class GitHubClient(private val apiUrl: String, private val token: String) {
+class GitHubClient(private val apiUrl: String, private val token: String, private val graphQlUrl: String = "") {
 
     private val http = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(15))
@@ -50,6 +54,69 @@ class GitHubClient(private val apiUrl: String, private val token: String) {
         return pullRequest(request("POST", "${repoPath(repo)}/pulls", payload).asJsonObject)
     }
 
+    fun currentUser(): String = request("GET", "/user").asJsonObject.string("login")
+
+    /** Os PRs abertos de [author] no repositório, do atualizado mais recente para o mais antigo. */
+    fun openPullRequestsBy(repo: GitHubRepo, author: String): List<WatchedPr> {
+        val prs = mutableListOf<WatchedPr>()
+        for (page in 1..MAX_PAGES) {
+            val batch = request("GET", "${repoPath(repo)}/pulls?state=open&sort=updated&direction=desc&per_page=100&page=$page").asJsonArray
+            batch.map { it.asJsonObject }
+                .filter { it.getAsJsonObject("user")?.optString("login").equals(author, ignoreCase = true) }
+                .forEach { json ->
+                    prs += WatchedPr(pullRequest(json), json.getAsJsonObject("head").string("ref"), json.optString("updated_at").orEmpty(), emptyList())
+                }
+            if (batch.size() < 100) break
+        }
+        return prs
+    }
+
+    /** As conversas do PR [number]: nas linhas (com resolvida e desatualizada), na conversa geral e nas revisões. */
+    fun threads(repo: GitHubRepo, number: Int): List<PrThread> {
+        val variables = JsonObject().apply {
+            addProperty("owner", repo.owner)
+            addProperty("name", repo.name)
+            addProperty("number", number)
+        }
+        val pullRequest = graphQl(RadarParser.QUERY, variables).getAsJsonObject("repository")?.getAsJsonObject("pullRequest") ?: return emptyList()
+        return RadarParser.threads(pullRequest)
+    }
+
+    /** Resposta publicada na conversa da linha que começa no comentário [commentId]. */
+    fun replyToReviewComment(repo: GitHubRepo, number: Int, commentId: Long, body: String): PrComment {
+        val json = request("POST", "${repoPath(repo)}/pulls/$number/comments/$commentId/replies", JsonObject().apply { addProperty("body", body) }).asJsonObject
+        return comment("c", json)
+    }
+
+    fun addConversationComment(repo: GitHubRepo, number: Int, body: String): PrComment {
+        val json = request("POST", "${repoPath(repo)}/issues/$number/comments", JsonObject().apply { addProperty("body", body) }).asJsonObject
+        return comment("i", json)
+    }
+
+    private fun comment(prefix: String, json: JsonObject): PrComment {
+        val id = json["id"].asLong
+        return PrComment(
+            key = "$prefix:$id",
+            id = id,
+            author = json.getAsJsonObject("user")?.optString("login") ?: "fantasma",
+            body = json.optString("body").orEmpty(),
+            createdAt = json.optString("created_at").orEmpty(),
+            url = json.optString("html_url").orEmpty(),
+        )
+    }
+
+    /** O `data` da resposta; os erros do GraphQL viram exceção. */
+    private fun graphQl(query: String, variables: JsonObject): JsonObject {
+        if (graphQlUrl.isBlank()) throw DeliveryException("A conta do GitHub não informou o endereço do GraphQL.")
+        val payload = JsonObject().apply {
+            addProperty("query", query)
+            add("variables", variables)
+        }
+        val json = send("POST", graphQlUrl, payload).asJsonObject
+        json.getAsJsonArray("errors")?.firstOrNull()?.asJsonObject?.optString("message")?.let { throw DeliveryException(errorMessage(200, """{"message":${JsonPrimitive(it)}}""")) }
+        return json.getAsJsonObject("data") ?: JsonObject()
+    }
+
     private fun pullRequest(json: JsonObject) = PullRequestRef(
         number = json["number"].asInt,
         url = json.string("html_url"),
@@ -58,9 +125,11 @@ class GitHubClient(private val apiUrl: String, private val token: String) {
         draft = json.get("draft")?.takeUnless { it is JsonNull }?.asBoolean == true,
     )
 
-    private fun request(method: String, path: String, payload: JsonObject? = null): JsonElement {
+    private fun request(method: String, path: String, payload: JsonObject? = null): JsonElement = send(method, apiUrl.trimEnd('/') + path, payload)
+
+    private fun send(method: String, url: String, payload: JsonObject?): JsonElement {
         val body = payload?.let { HttpRequest.BodyPublishers.ofString(it.toString()) } ?: HttpRequest.BodyPublishers.noBody()
-        val request = HttpRequest.newBuilder(URI(apiUrl.trimEnd('/') + path))
+        val request = HttpRequest.newBuilder(URI(url))
             .timeout(Duration.ofSeconds(30))
             .header("Accept", "application/vnd.github+json")
             .header("Authorization", "Bearer $token")

@@ -6,9 +6,13 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.mio.tomahawk.base.TomahawkToolWindowFactory
+import com.mio.tomahawk.delivery.DeliveryMode
 import com.mio.tomahawk.delivery.DeliveryRequest
+import com.mio.tomahawk.delivery.DeliveryWriter
+import com.mio.tomahawk.delivery.PrRadarService
 import com.mio.tomahawk.delivery.PullRequestDraft
 import com.mio.tomahawk.delivery.PullRequestService
+import com.mio.tomahawk.delivery.WriteTarget
 import com.mio.tomahawk.run.LaunchTerminal
 import com.mio.tomahawk.run.Mission
 import com.mio.tomahawk.run.MissionRunner
@@ -48,10 +52,14 @@ class LauncherWeb(project: Project) : WebTab(project) {
     private var prDraft = false
     private var prFeature: Path? = null
     private var prBusy = false
+    private var prMode = DeliveryMode.PULL_REQUEST
+    /** O modo da última entrega enviada: só a de PR usa o título e a descrição. */
+    private var prSent = DeliveryMode.PULL_REQUEST
 
     init {
         project.messageBus.connect(this).subscribe(SpecKitService.CHANGED, SpecKitService.Listener { onSnapshot() })
         project.messageBus.connect(this).subscribe(PullRequestService.CHANGED, PullRequestService.Listener { onDelivery() })
+        project.messageBus.connect(this).subscribe(PrRadarService.CHANGED, PrRadarService.Listener { refresh() })
         project.messageBus.connect(this).subscribe(
             MissionRunner.RUNS,
             MissionRunner.Listener { ApplicationManager.getApplication().invokeLater({ updateTimer(); refresh() }, project.disposed) },
@@ -74,12 +82,19 @@ class LauncherWeb(project: Project) : WebTab(project) {
         refresh()
     }
 
-    /** Depois de uma entrega sem erro, os campos voltam aos valores da feature: o PR já está aberto. */
+    /**
+     * Depois de uma entrega sem erro, a mensagem do commit volta ao valor da feature; depois de um PR, os outros
+     * campos também, porque ele já está aberto.
+     */
     private fun onDelivery() {
         val busy = pr.step != null
         if (prBusy && !busy && pr.lastError == null) {
-            prFields.clear()
-            prDraft = false
+            if (prSent == DeliveryMode.PULL_REQUEST) {
+                prFields.clear()
+                prDraft = false
+            } else {
+                prFields.remove("commit")
+            }
         }
         prBusy = busy
         refresh()
@@ -151,7 +166,7 @@ class LauncherWeb(project: Project) : WebTab(project) {
         append(WebUi.section("Extração · Pull Request", WebUi.button("↻ Atualizar", "pr-refresh", "ghost", title = "Relê o repositório e o GitHub")))
         append("<div class=\"card2\" data-form=\"pr\">")
         append("<h3>🛬 Leve a missão para revisão</h3>")
-        append("<div class=\"desc\">Commit das alterações, push da branch e o pull request no GitHub, com a descrição tirada da spec e das tarefas.</div>")
+        append("<div class=\"desc\">Só o commit, o commit com o push da branch ou tudo isso e o pull request no GitHub. A mensagem do commit e o texto do PR saem da spec e das tarefas, ou a IA escreve a partir do diff.</div>")
         if (local == null) {
             append("<div class=\"status-line\">Lendo o repositório Git…</div></div>")
             return@buildString
@@ -166,87 +181,132 @@ class LauncherWeb(project: Project) : WebTab(project) {
         append(if (local.account != null) WebUi.chip("GitHub", "@" + esc(local.account), "green") else WebUi.chip("GitHub", "entrar", "yellow", cmd = "pr-login"))
         append("</div>")
 
+        val mode = prMode
+        val opensPr = mode == DeliveryMode.PULL_REQUEST
+        val canPr = local.account != null && remote != null
         if (local.account == null) {
-            append(notice("warn", "🔑", "Entre na conta do GitHub da IDE para abrir pull requests em <b>${esc(local.host)}</b>.", WebUi.button("🔑 Entrar no GitHub", "pr-login")))
-            append("</div>")
-            return@buildString
-        }
-        state.problem?.let { append(notice("err", "⚠️", "O GitHub não respondeu: ${esc(it)}", WebUi.button("Tentar de novo", "pr-refresh"))) }
-        if (remote == null) {
-            append("<div class=\"status-line\">").append(if (pr.loading) "Consultando o GitHub…" else "Sem resposta do GitHub.").append("</div></div>")
-            return@buildString
+            append(notice("warn", "🔑", "Para abrir pull requests, entre na conta do GitHub da IDE em <b>${esc(local.host)}</b>. Commitar e enviar já funcionam.",
+                WebUi.button("🔑 Entrar no GitHub", "pr-login")))
+        } else {
+            state.problem?.let { append(notice("err", "⚠️", "O GitHub não respondeu: ${esc(it)}", WebUi.button("Tentar de novo", "pr-refresh"))) }
+            if (remote == null && pr.loading) append("<div class=\"status-line\" style=\"margin:0 0 10px\">Consultando o GitHub…</div>")
         }
         val busy = pr.step
+        val writing = pr.writing
         if (busy != null) append(notice("info", "🛰️", esc(busy)))
-        pr.lastError?.takeIf { busy == null }?.let { append(notice("err", "⚠️", esc(it))) }
+        if (writing != null) append(notice("info", "✨", "A IA está escrevendo ${esc(writing.label)}…"))
+        pr.lastError?.takeIf { busy == null && writing == null }?.let { append(notice("err", "⚠️", esc(it))) }
         if (open != null) {
             val badge = if (open.draft) " <span class=\"tag\">rascunho</span>" else ""
-            append(notice("ok", "✅", "<b>PR #${open.number}</b> aberto: ${esc(open.title)} → <code>${esc(open.base)}</code>$badge",
-                WebUi.button("🌐 Abrir no GitHub", "pr-open", arg = open.url)))
+            val waiting = PrRadarService.getInstance(project).pendingCount(open.number)
+            val radio = if (waiting > 0) " · 💬 <b>$waiting conversa(s)</b> aguardando sua resposta" else ""
+            append(notice("ok", "✅", "<b>PR #${open.number}</b> aberto: ${esc(open.title)} → <code>${esc(open.base)}</code>$badge$radio",
+                WebUi.button("🌐 Abrir no GitHub", "pr-open", arg = open.url) + " " +
+                    WebUi.button(if (waiting > 0) "📻 Ver os comentários ($waiting)" else "📻 Ver os comentários", "radio", if (waiting > 0) "primary" else "")))
         }
-        if (statuses.none { it.step == SddStep.CONVERGE && it.state == StepState.DONE } && open == null) {
+        if (opensPr && open == null && statuses.none { it.step == SddStep.CONVERGE && it.state == StepState.DONE }) {
             append("<div class=\"status-line\" style=\"margin:0 0 10px\">A Avaliação de Danos ainda não convergiu: dá para abrir o PR já, como rascunho, e completar depois.</div>")
         }
 
         val specTitle = feature?.spec?.file?.let { SpecKitLayout.read(it)?.lines() }?.let(PullRequestDraft::specTitle)
-        val branch = prFields["branch"] ?: PullRequestDraft.branch(feature, local.branch, remote.defaultBranch)
-        val base = prFields["base"] ?: PullRequestDraft.base(remote, branch)
+        val branch = prFields["branch"] ?: PullRequestDraft.branch(feature, local.branch, remote?.defaultBranch)
+        val base = prFields["base"] ?: remote?.let { PullRequestDraft.base(it, branch) }.orEmpty()
         val title = prFields["title"] ?: PullRequestDraft.title(feature, specTitle)
         val commit = prFields["commit"] ?: title
         val text = prFields["body"] ?: PullRequestDraft.body(feature, specTitle) { s.relative(it) }
+        val aiWhy = when {
+            busy != null -> "Há uma entrega em andamento"
+            writing != null -> "A IA já está escrevendo"
+            !TomahawkSettings.ready -> "Teste a integração com a IA no Arsenal"
+            else -> null
+        }
 
+        append("<div class=\"field\"><label>O que fazer</label>")
+        append(WebUi.seg("mode", DeliveryMode.entries.map { it.name to modeLabel(it) }, mode.name, send = "pr-mode")).append("</div>")
         append("<div class=\"cols\">")
-        append(input("Branch do PR", "branch", branch, if (branch != local.branch && branch.isNotEmpty()) "Criada agora, a partir de ${esc(local.branch ?: "HEAD")}." else null))
-        if (open == null) {
+        append(input("Branch", "branch", branch, if (branch != local.branch && branch.isNotEmpty()) "Criada agora, a partir de ${esc(local.branch ?: "HEAD")}." else null))
+        if (opensPr && open == null && remote != null) {
             val bases = (listOf(remote.defaultBranch, "develop") + remote.branches.sorted()).distinct().filter { it in remote.branches && it != branch }
-            append("<div class=\"field\"><label>Base</label><select class=\"in\" name=\"base\" data-change=\"pr-base\">")
+            append("<div class=\"field\"><label>Base do PR</label><select class=\"in\" name=\"base\" data-change=\"pr-base\">")
             bases.forEach { append("<option value=\"${WebUi.attr(it)}\"").append(if (it == base) " selected" else "").append(">${esc(it)}</option>") }
             append("</select></div>")
         }
         append("</div>")
         if (local.changes.isNotEmpty()) {
-            append(input("Mensagem do commit", "commit", commit, null))
+            append("<div class=\"field\"><div class=\"fh\"><label>Mensagem do commit</label>")
+            append(aiButton(WriteTarget.COMMIT, writing, aiWhy)).append("</div>")
+            append("<textarea class=\"in\" name=\"commit\" data-draft=\"pr.commit\" style=\"min-height:110px\">").append(esc(commit)).append("</textarea>")
+            append("<span class=\"hint\">A primeira linha é o título do commit; depois de uma linha em branco, o corpo com os detalhes.</span></div>")
             append("<details style=\"margin:-6px 0 12px\"><summary class=\"status-line\" style=\"cursor:pointer\">${local.changes.size} arquivo(s) no commit · fora tomahawk/ e .idea/</summary><div class=\"list\" style=\"margin-top:6px\">")
             local.changes.take(MAX_FILES).forEach { append("<div class=\"li\"><span class=\"ac-file\">").append(esc(it)).append("</span></div>") }
             if (local.changes.size > MAX_FILES) append("<div class=\"li meta\">e mais ${local.changes.size - MAX_FILES}…</div>")
             append("</div></details>")
         }
-        if (open == null) {
-            append(input("Título", "title", title, null))
-            append("<div class=\"field\"><label>Descrição</label><textarea class=\"in\" name=\"body\" data-draft=\"pr.body\" style=\"min-height:160px\">")
-            append(esc(text)).append("</textarea></div>")
+        if (opensPr && open == null) {
+            append(input("Título do PR", "title", title, null))
+            append("<div class=\"field\"><div class=\"fh\"><label>Descrição do PR</label>")
+            append(aiButton(WriteTarget.PULL_REQUEST, writing, aiWhy ?: if (base.isEmpty()) "Escolha a base do PR" else null)).append("</div>")
+            append("<textarea class=\"in\" name=\"body\" data-draft=\"pr.body\" style=\"min-height:160px\">").append(esc(text)).append("</textarea>")
+            append("<span class=\"hint\">✨ Gerar com IA escreve o título e a descrição a partir dos commits e do diff contra a base.</span></div>")
         }
 
         append("<div class=\"st-tools\"><div class=\"row-btns\">")
-        if (open == null) {
+        if (opensPr && open == null) {
             append("<label class=\"status-line\" style=\"margin:0;display:inline-flex;gap:6px;align-items:center\"><input type=\"checkbox\" name=\"draft\" data-change=\"pr-draft\"")
             append(if (prDraft) " checked" else "").append("> Abrir como rascunho</label>")
         }
         append("</div><div class=\"row-btns\">")
-        val label = when {
-            open != null && local.changes.isNotEmpty() -> "⬆️ Commitar e enviar ao PR #${open.number}"
-            open != null -> "⬆️ Enviar ao PR #${open.number}"
-            local.changes.isNotEmpty() -> "🚀 Commitar, enviar e abrir PR"
-            else -> "🚀 Enviar e abrir PR"
+        val changes = local.changes.isNotEmpty()
+        val label = when (mode) {
+            DeliveryMode.COMMIT -> "💾 Commitar ${local.changes.size} arquivo(s)"
+            DeliveryMode.PUSH -> if (changes) "⬆️ Commitar e enviar" else "⬆️ Enviar ${local.ahead} commit(s)"
+            DeliveryMode.PULL_REQUEST -> when {
+                open != null && changes -> "⬆️ Commitar e enviar ao PR #${open.number}"
+                open != null -> "⬆️ Enviar ao PR #${open.number}"
+                changes -> "🚀 Commitar, enviar e abrir PR"
+                else -> "🚀 Enviar e abrir PR"
+            }
         }
+        val nothingToPush = !changes && local.ahead == 0 && local.upstream != null && branch == local.branch
         val why = when {
             busy != null -> "Há uma entrega em andamento"
-            open != null && local.changes.isEmpty() && local.ahead == 0 && branch == local.branch -> "O PR já tem tudo: não há alterações nem commits sem push"
+            writing != null -> "A IA está escrevendo o texto"
+            mode == DeliveryMode.COMMIT && !changes -> "Não há alterações para commitar"
+            mode == DeliveryMode.PUSH && nothingToPush -> "Não há alterações nem commits sem push"
+            opensPr && !canPr -> if (local.account == null) "Entre na conta do GitHub para abrir o PR" else "O GitHub não respondeu"
+            opensPr && open != null && nothingToPush -> "O PR já tem tudo: não há alterações nem commits sem push"
             else -> null
         }
         append(WebUi.button(label, "pr", "primary big", enabled = why == null, title = why))
         append("</div></div>")
-        append("<div class=\"status-line\">").append(plan(local.changes.size, branch, local.branch, local.remote, base, open?.number)).append("</div>")
+        append("<div class=\"status-line\">").append(plan(mode, local.changes.size, branch, local.branch, local.remote, base, open?.number)).append("</div>")
         append("</div>")
     }
 
-    private fun plan(changes: Int, branch: String, current: String?, remote: String, base: String, open: Int?): String {
+    private fun modeLabel(mode: DeliveryMode) = when (mode) {
+        DeliveryMode.COMMIT -> "💾 Só commitar"
+        DeliveryMode.PUSH -> "⬆️ Commitar e enviar"
+        DeliveryMode.PULL_REQUEST -> "🚀 Commitar, enviar e abrir PR"
+    }
+
+    private fun aiButton(target: WriteTarget, writing: WriteTarget?, why: String?): String =
+        WebUi.button(
+            if (writing == target) "⏳ Gerando…" else "✨ Gerar com IA",
+            "pr-write",
+            "ghost sm",
+            arg = target.name,
+            enabled = why == null,
+            title = why ?: "A IA do Arsenal (${TomahawkSettings.provider.title}) escreve ${target.label} a partir das alterações",
+        )
+
+    private fun plan(mode: DeliveryMode, changes: Int, branch: String, current: String?, remote: String, base: String, open: Int?): String {
         val steps = buildList {
             if (branch.isNotEmpty() && branch != current) add("cria a branch <b>${esc(branch)}</b>")
             if (changes > 0) add("commita $changes arquivo(s)")
-            add("envia <b>${esc(branch)}</b> para <b>${esc(remote)}</b>")
-            add(if (open != null) "atualiza o PR #$open" else "abre o PR para <b>${esc(base)}</b>")
+            if (mode != DeliveryMode.COMMIT) add("envia <b>${esc(branch)}</b> para <b>${esc(remote)}</b>")
+            if (mode == DeliveryMode.PULL_REQUEST) add(if (open != null) "atualiza o PR #$open" else "abre o PR para <b>${esc(base.ifEmpty { "a base" })}</b>")
         }
+        if (steps.isEmpty()) return "Nada a fazer."
         return steps.joinToString(", ").replaceFirstChar { it.uppercase() } + "."
     }
 
@@ -255,6 +315,12 @@ class LauncherWeb(project: Project) : WebTab(project) {
         append("<input class=\"in\" name=\"$name\" data-draft=\"pr.$name\" value=\"").append(WebUi.attr(value)).append("\">")
         hint?.let { append("<span class=\"hint\">").append(it).append("</span>") }
         append("</div>")
+    }
+
+    /** Guarda o que está nos campos do PR, para o redesenho não apagar. */
+    private fun saveFields(data: JsonObject) {
+        listOf("branch", "base", "title", "body", "commit").forEach { key -> data.str(key)?.let { prFields[key] = it } }
+        data.get("draft")?.let { prDraft = data.str("draft") == "true" }
     }
 
     private fun notice(kind: String, icon: String, html: String, action: String = ""): String =
@@ -414,21 +480,44 @@ class LauncherWeb(project: Project) : WebTab(project) {
                 else step?.let { drafts[it] = data.str("text").orEmpty() }
             }
             "pr-base" -> data.str("value")?.let { prFields["base"] = it }
+            "pr-mode" -> {
+                saveFields(data)
+                DeliveryMode.entries.firstOrNull { it.name == data.str("value") }?.let { prMode = it }
+                refresh(force = true)
+            }
+            "pr-write" -> {
+                val target = WriteTarget.entries.firstOrNull { it.name == data.str("arg") } ?: return
+                saveFields(data)
+                val base = data.str("base") ?: pr.state?.remote?.openPr?.base.orEmpty()
+                val feature = service.snapshot.active?.let { service.snapshot.relative(it.dir) }
+                pr.write(target, base, feature) { text ->
+                    when (target) {
+                        WriteTarget.COMMIT -> prFields["commit"] = text
+                        WriteTarget.PULL_REQUEST -> {
+                            val (title, body) = DeliveryWriter.pullRequest(text)
+                            if (title.isNotBlank()) prFields["title"] = title
+                            if (body.isNotBlank()) prFields["body"] = body
+                        }
+                    }
+                    refresh(force = true)
+                }
+            }
             "pr-draft" -> prDraft = data.str("draft") == "true"
             "pr-refresh" -> pr.refresh(remote = true, delayMs = 0)
             "pr-login" -> pr.login()
             "pr-open" -> data.str("arg")?.let(BrowserUtil::browse)
             "pr" -> {
-                listOf("branch", "base", "title", "body", "commit").forEach { key -> data.str(key)?.let { prFields[key] = it } }
-                prDraft = data.str("draft") == "true"
+                saveFields(data)
+                prSent = prMode
                 pr.deliver(
                     DeliveryRequest(
                         branch = data.str("branch").orEmpty(),
                         base = data.str("base") ?: pr.state?.remote?.openPr?.base.orEmpty(),
-                        commitMessage = data.str("commit").orEmpty(),
-                        title = data.str("title").orEmpty(),
-                        body = data.str("body").orEmpty(),
+                        commitMessage = data.str("commit") ?: prFields["commit"].orEmpty(),
+                        title = data.str("title") ?: prFields["title"].orEmpty(),
+                        body = data.str("body") ?: prFields["body"].orEmpty(),
                         draft = prDraft,
+                        mode = prMode,
                     ),
                 )
             }
@@ -451,6 +540,7 @@ class LauncherWeb(project: Project) : WebTab(project) {
             "open" -> data.str("arg")?.let { openArtifact(project, Path.of(it)) }
             "init" -> runner.initSpecKit()
             "arsenal" -> TomahawkToolWindowFactory.showTab(project, TomahawkToolWindowFactory.ARSENAL)
+            "radio" -> TomahawkToolWindowFactory.showTab(project, TomahawkToolWindowFactory.RADIO)
             "abort" -> runner.progress?.cancel()
         }
     }

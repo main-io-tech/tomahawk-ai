@@ -10,4 +10,5 @@ object TomahawkIcons {
     val avaliacao: Icon = IconLoader.getIcon("/icons/avaliacao.svg", TomahawkIcons::class.java)
     val telemetria: Icon = IconLoader.getIcon("/icons/telemetria.svg", TomahawkIcons::class.java)
     val arsenal: Icon = IconLoader.getIcon("/icons/arsenal.svg", TomahawkIcons::class.java)
+    val radio: Icon = IconLoader.getIcon("/icons/radio.svg", TomahawkIcons::class.java)
 }

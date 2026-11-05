@@ -5,4 +5,8 @@
     <extensions defaultExtensionNs="com.mio.tomahawk">
         <pullRequestGateway implementation="com.mio.tomahawk.delivery.github.GitHubPullRequests"/>
     </extensions>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity implementation="com.mio.tomahawk.delivery.github.RadarStartup"/>
+    </extensions>
 </idea-plugin>

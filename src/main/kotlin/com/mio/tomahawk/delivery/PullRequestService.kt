@@ -21,6 +21,9 @@ import com.intellij.util.Alarm
 import com.intellij.util.messages.Topic
 import com.mio.tomahawk.base.TomahawkIcons
 import com.mio.tomahawk.run.MissionRunner
+import com.mio.tomahawk.run.RunStore
+import java.nio.file.Files
+import java.nio.file.Path
 
 /**
  * A entrega da missão: o estado do repositório para o Lançador mostrar e o commit, o push e o PR, fora da EDT.
@@ -47,6 +50,11 @@ class PullRequestService(private val project: Project) : Disposable {
 
     @Volatile
     var lastError: String? = null
+        private set
+
+    /** O texto que a IA está escrevendo; nulo sem geração. */
+    @Volatile
+    var writing: WriteTarget? = null
         private set
 
     @Volatile
@@ -117,7 +125,12 @@ class PullRequestService(private val project: Project) : Disposable {
         step = "Preparando a extração…"
         lastError = null
         publish()
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Tomahawk IA: abrindo o pull request", false) {
+        val title = when (request.mode) {
+            DeliveryMode.COMMIT -> "Tomahawk IA: commitando"
+            DeliveryMode.PUSH -> "Tomahawk IA: commitando e enviando"
+            DeliveryMode.PULL_REQUEST -> "Tomahawk IA: abrindo o pull request"
+        }
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, title, false) {
             override fun run(indicator: ProgressIndicator) {
                 try {
                     val result = gateway.deliver(project, request) { text ->
@@ -125,14 +138,20 @@ class PullRequestService(private val project: Project) : Disposable {
                         indicator.text = text
                         publish()
                     }
-                    notifyDelivered(result)
+                    notifyDelivered(result, request)
                 } catch (e: Exception) {
                     if (e !is DeliveryException) LOG.warn("A entrega do Tomahawk falhou", e)
                     lastError = e.message ?: e.javaClass.simpleName
-                    notify("O pull request não foi aberto", lastError.orEmpty(), NotificationType.ERROR, null)
+                    val failed = when (request.mode) {
+                        DeliveryMode.COMMIT -> "O commit não foi feito"
+                        DeliveryMode.PUSH -> "O envio não terminou"
+                        DeliveryMode.PULL_REQUEST -> "O pull request não foi aberto"
+                    }
+                    notify(failed, lastError.orEmpty(), NotificationType.ERROR, null)
                 } finally {
                     step = null
                     refresh(remote = true, delayMs = 0)
+                    if (request.mode == DeliveryMode.PULL_REQUEST) PrRadarService.getInstance(project).refresh(delayMs = 1_000)
                 }
             }
         })
@@ -143,15 +162,72 @@ class PullRequestService(private val project: Project) : Disposable {
         if (gateway.login(project)) refresh(remote = true, delayMs = 0)
     }
 
-    private fun notifyDelivered(result: DeliveryResult) {
+    /**
+     * A IA escreve [target] a partir do diff, em segundo plano; [onDone] recebe o texto na EDT. [base] e [feature]
+     * (a pasta da feature, relativa à raiz) só valem para o PR.
+     */
+    fun write(target: WriteTarget, base: String, feature: String?, onDone: (String) -> Unit) {
+        val gateway = gateway ?: return
+        val root = project.basePath?.let { Path.of(it) } ?: return
+        if (writing != null) return
+        FileDocumentManager.getInstance().saveAllDocuments()
+        writing = target
+        lastError = null
+        publish()
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Tomahawk IA: escrevendo ${target.label}", false) {
+            override fun run(indicator: ProgressIndicator) {
+                var context: Path? = null
+                try {
+                    indicator.text = "Lendo as alterações…"
+                    val text = when (target) {
+                        WriteTarget.COMMIT -> gateway.changesContext(project)
+                        WriteTarget.PULL_REQUEST -> gateway.branchContext(project, base)
+                    }
+                    val name = "${System.currentTimeMillis()}-${target.name.lowercase()}-contexto.md"
+                    val relative = RunStore.writeInput(root, name, text)
+                    context = root.resolve(relative)
+                    indicator.text = "A IA está escrevendo ${target.label}…"
+                    val branch = state?.local?.branch ?: "HEAD"
+                    val prompt = when (target) {
+                        WriteTarget.COMMIT -> DeliveryWriter.commitPrompt(relative)
+                        WriteTarget.PULL_REQUEST -> DeliveryWriter.pullRequestPrompt(relative, branch, base, feature)
+                    }
+                    val answer = DeliveryWriter.ask(root, prompt)
+                    ApplicationManager.getApplication().invokeLater({ onDone(answer) }, project.disposed)
+                } catch (e: Exception) {
+                    if (e !is DeliveryException) LOG.warn("A IA do Tomahawk não escreveu ${target.label}", e)
+                    lastError = e.message ?: e.javaClass.simpleName
+                    notify("A IA não escreveu ${target.label}", lastError.orEmpty(), NotificationType.ERROR, null)
+                } finally {
+                    context?.let { runCatching { Files.deleteIfExists(it) } }
+                    writing = null
+                    publish()
+                }
+            }
+        })
+    }
+
+    private fun notifyDelivered(result: DeliveryResult, request: DeliveryRequest) {
+        val subject = request.commitMessage.trim().lineSequence().firstOrNull().orEmpty()
         val pr = result.pr
-        val title = if (result.created) "PR #${pr.number} aberto" else "PR #${pr.number} atualizado"
-        val content = buildString {
-            append(pr.title)
-            append(if (result.created) " → ${pr.base}" else ": os commits novos foram enviados")
-            if (pr.draft) append(" (rascunho)")
+        when {
+            pr != null -> {
+                val title = if (result.created) "PR #${pr.number} aberto" else "PR #${pr.number} atualizado"
+                val content = buildString {
+                    append(pr.title)
+                    append(if (result.created) " → ${pr.base}" else ": os commits novos foram enviados")
+                    if (pr.draft) append(" (rascunho)")
+                }
+                notify(title, content, NotificationType.INFORMATION, pr.url)
+            }
+            result.pushed -> notify(
+                "${result.branch} enviada para ${result.remote}",
+                if (result.committed) "Commit: $subject" else "Os commits que faltavam foram enviados.",
+                NotificationType.INFORMATION,
+                null,
+            )
+            else -> notify("Commit feito em ${result.branch}", subject, NotificationType.INFORMATION, null)
         }
-        notify(title, content, NotificationType.INFORMATION, pr.url)
     }
 
     private fun notify(title: String, content: String, type: NotificationType, url: String?) {

@@ -24,9 +24,16 @@ data class RemoteInfo(val branch: String?, val defaultBranch: String, val branch
 
 data class PullRequestRef(val number: Int, val url: String, val title: String, val base: String, val draft: Boolean)
 
+/** Até onde a entrega vai: cada modo faz também o que os anteriores fazem. */
+enum class DeliveryMode(val label: String) {
+    COMMIT("Só commitar"),
+    PUSH("Commitar e enviar"),
+    PULL_REQUEST("Commitar, enviar e abrir PR"),
+}
+
 /**
  * A entrega: [branch] diferente da atual é criada a partir dela; com alterações, o commit usa [commitMessage].
- * O push vai para a [branch] no remote e o PR, de [branch] para [base].
+ * Conforme o [mode], o push vai para a [branch] no remote e o PR, de [branch] para [base].
  */
 data class DeliveryRequest(
     val branch: String,
@@ -35,10 +42,18 @@ data class DeliveryRequest(
     val title: String,
     val body: String,
     val draft: Boolean,
+    val mode: DeliveryMode = DeliveryMode.PULL_REQUEST,
 )
 
-/** [created] é falso quando o PR já existia e só recebeu os commits novos. */
-data class DeliveryResult(val pr: PullRequestRef, val created: Boolean, val committed: Boolean)
+/** [pr] só no modo de PR; [created] é falso quando o PR já existia e só recebeu os commits novos. */
+data class DeliveryResult(
+    val branch: String,
+    val committed: Boolean,
+    val pushed: Boolean,
+    val pr: PullRequestRef? = null,
+    val created: Boolean = false,
+    val remote: String = "",
+)
 
 class DeliveryException(message: String) : Exception(message)
 
@@ -56,6 +71,18 @@ interface PullRequestGateway {
 
     /** Fora da EDT; faz Git e rede. [step] conta o passo em andamento. */
     fun deliver(project: Project, request: DeliveryRequest, step: (String) -> Unit): DeliveryResult
+
+    /** Fora da EDT. As alterações não commitadas, em Markdown, para a IA escrever a mensagem do commit. */
+    fun changesContext(project: Project): String
+
+    /** Fora da EDT. Os commits e o diff da branch atual contra a [base] no remote, mais o que falta commitar. */
+    fun branchContext(project: Project, base: String): String
+
+    /** Fora da EDT; faz rede. Os PRs abertos pelo usuário no repositório, com as conversas; nulo sem repositório ou sem conta. */
+    fun radar(project: Project): RadarSnapshot?
+
+    /** Fora da EDT; faz rede. Responde a [thread] do PR [number]: na conversa da linha ou na conversa geral, citando o autor. */
+    fun reply(project: Project, number: Int, thread: PrThread, body: String): PrComment
 
     /** Na EDT. Abre o login do GitHub da IDE; devolve true se uma conta entrou. */
     fun login(project: Project): Boolean
