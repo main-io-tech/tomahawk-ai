@@ -11,6 +11,7 @@ import com.mio.tomahawk.run.AgentHost
 import com.mio.tomahawk.run.AgentLaunch
 import com.mio.tomahawk.run.AgentProvider
 import com.mio.tomahawk.run.AgentVerifier
+import com.mio.tomahawk.run.DevContainer
 import com.mio.tomahawk.run.Guardrails
 import com.mio.tomahawk.run.LaunchTerminal
 import com.mio.tomahawk.run.MissionRunner
@@ -19,6 +20,8 @@ import com.mio.tomahawk.run.SpecKitSetup
 import com.mio.tomahawk.run.TomahawkSettings
 import com.mio.tomahawk.speckit.SddStep
 import com.mio.tomahawk.speckit.SpecKitService
+import java.nio.file.Files
+import java.nio.file.Path
 
 /**
  * O Arsenal: a configuração da IA, como o Interceptador do Iron Dome. Configuração automática, os campos do CLI
@@ -64,6 +67,8 @@ class ArsenalWeb(project: Project) : WebTab(project) {
     private var autoStatus: Status? = null
     private var autoFailure: String? = null
     private var terminalStatus: Status? = null
+    private var containerStatus: Status? = null
+    private var containerBusy = false
 
     init {
         ApplicationManager.getApplication().messageBus.connect(this).subscribe(
@@ -118,6 +123,7 @@ class ArsenalWeb(project: Project) : WebTab(project) {
         append(cliCard(busy))
         append("</div><div>")
         append(runCard())
+        append(containerCard())
         append(guardCard())
         append(specKitCard())
         append(capsCard(ready))
@@ -176,10 +182,11 @@ class ArsenalWeb(project: Project) : WebTab(project) {
             append("</div>")
         }
         append("<div class=\"notice warn\" style=\"margin:0 0 12px\"><span class=\"ni\">🔐</span><div class=\"nb\">")
-        append("<b>Missões na aba:</b> o Cursor roda com <code>--force --trust</code> e o Claude Code com <code>--permission-mode bypassPermissions</code>, ")
-        append("como no despacho de workflows do Spec Kit: a IA roda scripts e escreve arquivos sem perguntar, com as permissões do seu usuário. ")
-        append("O cartão <b>Proteções</b> barra o que pode danificar a máquina e guarda um ponto de restauração. Para aprovar cada passo, lance no terminal da IDE.<br>")
-        append("<b>Textos</b> (commit, PR, respostas do Rádio) e o teste: só leitura, com o Cursor em <code>--mode ask</code> e o Claude Code em ")
+        append("<b>Missões na aba:</b> só no <b>devcontainer</b> do projeto, a única forma de a IA rodar sem perguntar. Lá o Cursor roda com ")
+        append("<code>--force --trust</code> e o Claude Code com <code>--permission-mode bypassPermissions</code>, mas o container só enxerga a pasta do projeto.<br>")
+        append("<b>No terminal da IDE:</b> modo agente sem permissão total, nesta máquina. O Cursor roda sem <code>--force</code> e o Claude Code em ")
+        append("<code>--permission-mode acceptEdits</code>: a IA edita o projeto e pede a sua aprovação antes de rodar comandos.<br>")
+        append("<b>Textos</b> (commit, PR, respostas do Rádio) e os testes: só leitura, com o Cursor em <code>--mode ask</code> e o Claude Code em ")
         append("<code>--permission-mode dontAsk</code> com <code>--allowedTools ${AgentCommand.READ_TOOLS}</code>. ")
         append("Assim, um comentário malicioso num PR não dá à IA permissão para alterar arquivos.</div></div>")
         append("<div class=\"row-btns\">")
@@ -223,13 +230,93 @@ class ArsenalWeb(project: Project) : WebTab(project) {
         append("<div class=\"card2\"><h3>🎛️ Lançamento</h3><div class=\"desc\">Onde as missões rodam por padrão; cada etapa pode trocar na hora de lançar.</div>")
         append("<div class=\"field\"><label>Onde lançar</label>")
         append(WebUi.seg("runMode", RunMode.entries.map { it.name to it.label }, TomahawkSettings.runMode.name, send = "runmode")).append("</div>")
-        append("<div class=\"desc\">Na aba, a Telemetria acompanha cada passo e a IA decide sozinha quando o comando faria perguntas. ")
-        append("No terminal da IDE você conversa com a IA (o Reconhecimento já abre lá).</div>")
+        append("<div class=\"desc\">Na aba, a IA roda sem perguntar no devcontainer, a Telemetria acompanha cada passo e a IA decide sozinha quando o comando faria perguntas. ")
+        append("No terminal da IDE você conversa com a IA e aprova os comandos dela (o Reconhecimento já abre lá).</div>")
         append(WebUi.button(if (AgentVerifier.testingTerminal) "⏳ Esperando o terminal…" else "💻 Testar no terminal", "terminal",
             enabled = terminal && !AgentVerifier.testingTerminal && TomahawkSettings.launch() != null,
             title = if (terminal) "Abre o terminal da IDE e roda o CLI com a configuração salva" else "O plugin de terminal da IDE está desligado"))
         status(terminalStatus ?: TomahawkSettings.terminalVerifiedAt?.let { Status("Terminal testado em $it.", true) })
         append("</div>")
+    }
+
+    private fun containerCard(): String = buildString {
+        val root = service.root()
+        val cli = DevContainer.cli()
+        val config = root?.let(DevContainer::config)?.takeIf { Files.isRegularFile(it) }
+        val exists = config != null
+        val problems = config?.let { file -> DevContainer.audit(runCatching { Files.readString(file) }.getOrDefault("")) }.orEmpty()
+        val cursor = TomahawkSettings.provider == AgentProvider.CURSOR
+        append("<div class=\"card2\"><h3>📦 Devcontainer</h3><div class=\"desc\">A única forma de a IA rodar sem perguntar: as missões na aba rodam num container ")
+        append("que só enxerga a pasta do projeto. Sem ele, as missões só saem pelo terminal, com você aprovando os comandos.</div>")
+        append("<div class=\"chips\" style=\"margin:0 0 10px\">")
+        append(if (cli != null) WebUi.chip("CLI", "devcontainer ✓", "green") else WebUi.chip("CLI", "devcontainer não instalado", "red"))
+        append(
+            when {
+                !exists -> WebUi.chip("Projeto", "sem devcontainer", "yellow")
+                problems.isEmpty() -> WebUi.chip("Isolamento", "conferido ✓", "green")
+                else -> WebUi.chip("Isolamento", "${problems.size} problema(s)", "red")
+            },
+        )
+        append("</div>")
+        if (cli == null) append("<div class=\"notice warn\"><span class=\"ni\">🐳</span><div class=\"nb\">").append(esc(DevContainer.CLI_HINT)).append("</div></div>")
+        if (problems.isNotEmpty()) {
+            append("<div class=\"notice err\"><span class=\"ni\">⚠️</span><div class=\"nb\">O <code>").append(DevContainer.CONFIG).append("</code> não isola a máquina:<ul>")
+            problems.forEach { append("<li>").append(esc(it)).append("</li>") }
+            append("</ul></div></div>")
+        }
+        append("<ul class=\"caps\">")
+        listOf(
+            "<b>Só o projeto</b>: o container não vê as suas pastas, as suas credenciais nem o Docker da máquina.",
+            "<b>Git protegido</b>: o <code>.git/config</code> e os hooks ficam só leitura lá dentro, porque o Git da sua máquina roda o que estiver neles.",
+            "<b>Conferido a cada missão</b>: o Tomahawk recusa o container privilegiado, com rede ou processos da máquina, ou com pastas da máquina montadas.",
+        ).forEach { append("<li><span class=\"ck on\">✓</span><span>").append(it).append("</span></li>") }
+        append("</ul>")
+        if (cursor) {
+            append("<div class=\"status-line").append(if (TomahawkSettings.hasCursorApiKey) "" else " bad").append("\">No container, o Cursor CLI entra pela chave de API do cartão <b>CLI de IA</b>.</div>")
+        } else {
+            append("<div class=\"status-line\">No container, o Claude Code usa o login feito lá dentro (guardado num volume) ou o <code>ANTHROPIC_API_KEY</code> desta máquina. Para entrar uma vez:</div>")
+            append("<div class=\"cmdline\">devcontainer exec --workspace-folder . --config ").append(DevContainer.CONFIG).append(" claude</div>")
+        }
+        append("<div class=\"row-btns\" style=\"margin-top:10px\">")
+        if (!exists) {
+            append(WebUi.button("📦 Criar o devcontainer", "dc-create", "primary", enabled = root != null, title = "Grava ${DevContainer.CONFIG} com os CLIs de IA e o isolamento"))
+        } else {
+            append(WebUi.button("📄 Abrir devcontainer.json", "dc-open", "ghost"))
+            append(WebUi.button(if (containerBusy) "⏳ Subindo…" else "▶ Subir e conferir", "dc-up", enabled = cli != null && !containerBusy && runner.progress == null,
+                title = "Sobe o container (a primeira vez demora) e confere o isolamento"))
+        }
+        append("</div>")
+        status(containerStatus)
+        append("</div>")
+    }
+
+    private fun containerUp(root: Path) {
+        containerBusy = true
+        containerStatus = Status("Subindo o devcontainer (a primeira vez demora)…", null)
+        refresh(force = true)
+        var shown = 0L
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = runCatching {
+                DevContainer.up(root, { line ->
+                    val now = System.currentTimeMillis()
+                    if (now - shown > 1_000) {
+                        shown = now
+                        ApplicationManager.getApplication().invokeLater({
+                            if (containerBusy) containerStatus = Status("Subindo: $line", null)
+                            refresh()
+                        }, project.disposed)
+                    }
+                }, { false })
+            }
+            ApplicationManager.getApplication().invokeLater({
+                containerBusy = false
+                containerStatus = result.fold(
+                    onSuccess = { Status("Container de pé e isolado: a IA só enxerga ${it.folder}.", true) },
+                    onFailure = { Status(it.message ?: it.javaClass.simpleName, false) },
+                )
+                refresh(force = true)
+            }, project.disposed)
+        }
     }
 
     private fun guardCard(): String = buildString {
@@ -238,8 +325,8 @@ class ArsenalWeb(project: Project) : WebTab(project) {
         append("<div class=\"card2\"><h3>🛡️ Proteções</h3><div class=\"desc\">O que impede a IA, rodando sozinha, de danificar a máquina ou perder o seu trabalho.</div>")
         append("<div class=\"field\">").append(WebUi.seg("guard", listOf("on" to "🛡️ Ligadas", "off" to "Desligadas"), if (on) "on" else "off", send = "guard")).append("</div>")
         if (!on) {
-            append("<div class=\"notice err\" style=\"margin:0 0 10px\"><span class=\"ni\">⚠️</span><div class=\"nb\">Com as proteções desligadas, a IA roda qualquer comando ")
-            append("com as permissões do seu usuário e as missões não têm ponto de restauração.</div></div>")
+            append("<div class=\"notice err\" style=\"margin:0 0 10px\"><span class=\"ni\">⚠️</span><div class=\"nb\">Com as proteções desligadas, a IA roda sem as regras do Tomahawk ")
+            append("(no devcontainer e no terminal) e as missões não têm ponto de restauração.</div></div>")
         }
         append("<ul class=\"caps\">")
         listOf(
@@ -256,7 +343,7 @@ class ArsenalWeb(project: Project) : WebTab(project) {
         append("</ul><div class=\"row-btns\" style=\"margin-top:10px\">")
         append(WebUi.button("↩ Desfazer a última missão", "undo", "ghost", enabled = runner.progress == null,
             title = "Volta o projeto para o ponto de restauração da última missão, depois de mostrar o que mudou"))
-        append("</div><div class=\"status-line\">Nenhuma proteção substitui uma máquina isolada: para tarefas arriscadas, rode a IA num container, numa VM ou no WSL.</div>")
+        append("</div><div class=\"status-line\">Estas proteções valem também dentro do devcontainer e no terminal, mas quem isola a máquina é o devcontainer.</div>")
         append("</div>")
     }
 
@@ -271,6 +358,7 @@ class ArsenalWeb(project: Project) : WebTab(project) {
         append(
             when {
                 specify == null -> WebUi.chip("Máquina", "specify não instalado", "red")
+                info?.broken == true -> WebUi.chip("Máquina", "specify com defeito", "red")
                 info?.outdated == true -> WebUi.chip("Máquina", "specify v${esc(info.version ?: "?")} · nova v${esc(info.latest.orEmpty())}", "orange")
                 else -> WebUi.chip("Máquina", "specify ${info?.version?.let { "v" + esc(it) } ?: ""} ✓", "green")
             },
@@ -286,19 +374,14 @@ class ArsenalWeb(project: Project) : WebTab(project) {
             append("<div class=\"notice warn\"><span class=\"ni\">⚠️</span><div class=\"nb\">O projeto foi inicializado para <b>").append(esc(key))
             append("</b>, mas a IA configurada é o <b>").append(esc(TomahawkSettings.provider.title)).append("</b>, e os comandos dele podem não estar instalados.")
             append("<div class=\"cmdline\" style=\"margin:8px 0 0\">specify integration install ").append(esc(integration)).append("</div><div class=\"row-btns\">")
-            append(WebUi.button("🔌 Instalar a integração ${esc(integration)}", "specify-integration", enabled = specify != null && !installing))
+            append(WebUi.button("🔌 Instalar a integração ${esc(integration)}", "specify-integration", enabled = specify != null && !installing && info?.broken != true))
             append("</div></div></div>")
         }
         if (!s.initialized) {
-            append("<div class=\"notice warn\"><span class=\"ni\">🛰️</span><div class=\"nb\">Este projeto ainda não tem o Spec Kit (a pasta <b>.specify/</b>).")
-            append("<div class=\"cmdline\" style=\"margin:8px 0 0\">specify init --here --integration ").append(esc(integration)).append("</div><div class=\"row-btns\">")
-            append(
-                WebUi.button(
-                    "⚡ Instalar no projeto", "init", "primary", enabled = specify != null && !installing,
-                    title = if (specify == null) "Instale o Spec Kit nesta máquina primeiro" else "Roda specify init --here no terminal da IDE",
-                ),
-            )
-            append("</div></div></div>")
+            append("<div class=\"status-line\" style=\"margin-top:12px\">🛰️ Este projeto ainda não tem o Spec Kit (a pasta <b>.specify/</b>).</div>")
+            append(SpecKitWeb.initBox(specify))
+        } else {
+            SpecKitWeb.shellPicker().takeIf { it.isNotEmpty() }?.let { append("<div style=\"margin-top:12px\">").append(it).append("</div>") }
         }
         if (specify != null && !installing) {
             append("<div class=\"row-btns\" style=\"margin-top:10px\">")
@@ -422,6 +505,12 @@ class ArsenalWeb(project: Project) : WebTab(project) {
                 }
             }
             "init" -> runner.initSpecKit()
+            "init-copy" -> SpecKitSetup.copyInit(project)
+            "specify-shell" -> {
+                SpecKitWeb.choose(data.str("value"))
+                refresh(force = true)
+            }
+            "specify-repair" -> SpecKitSetup.repair(project)
             "specify-install" -> SpecKitSetup.install(project)
             "specify-upgrade" -> SpecKitSetup.upgrade(project)
             "specify-recheck" -> {
@@ -438,6 +527,18 @@ class ArsenalWeb(project: Project) : WebTab(project) {
                 refresh(force = true)
             }
             "undo" -> runner.undo()
+            "dc-create" -> service.root()?.let { root ->
+                containerStatus = runCatching { DevContainer.create(root) }.fold(
+                    onSuccess = {
+                        runner.open(it)
+                        Status("Criado em ${DevContainer.CONFIG}. Acrescente as ferramentas do projeto em features, se a IA precisar delas.", true)
+                    },
+                    onFailure = { Status("Não deu para criar: ${it.message ?: it.javaClass.simpleName}", false) },
+                )
+                refresh(force = true)
+            }
+            "dc-open" -> service.root()?.let { runner.open(DevContainer.config(it)) }
+            "dc-up" -> service.root()?.let(::containerUp)
         }
     }
 }

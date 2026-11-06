@@ -169,7 +169,8 @@ class LauncherPanel(private val project: Project) : SimpleToolWindowPanel(true, 
                 add(openArtifact)
             })
             add(WrapText(
-                "Na aba, a Telemetria acompanha cada passo e grava o registro em tomahawk/execucoes/. No terminal, você conversa com a IA (bom para o Reconhecimento, que faz perguntas).",
+                "Na aba, a IA roda sem perguntar no devcontainer do projeto, e a Telemetria acompanha cada passo e grava o registro em tomahawk/execucoes/. " +
+                    "No terminal, você conversa com a IA e aprova os comandos dela (bom para o Reconhecimento, que faz perguntas).",
                 JBFont.small(),
                 UIUtil.getContextHelpForeground(),
             ))

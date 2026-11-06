@@ -350,10 +350,20 @@ object WebUi {
         .chart-legend{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin:4px 4px 0}
 
         .empty2{text-align:center;padding:30px 20px;border:1px dashed var(--border);border-radius:16px;background:var(--card);margin-top:14px}
-        .empty2 .big{font-size:42px}
+        .empty2 > .big{font-size:42px;line-height:1.2}
         .empty2 h3{margin:8px 0 4px;font-size:16px}
         .empty2 p{color:var(--muted);margin:0 auto 14px;max-width:520px}
-        .cmdline{display:inline-block;margin:6px 0 14px;font:12px "JetBrains Mono",Consolas,monospace;background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
+        .cmdline{display:inline-block;margin:6px 0 14px;font:12px "JetBrains Mono",Consolas,monospace;background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:6px 10px;
+          max-width:100%;overflow-wrap:anywhere}
+        .setup-box{display:inline-flex;flex-direction:column;align-items:center;gap:10px;max-width:100%;padding:12px 16px;border:1px solid var(--border);
+          border-radius:12px;background:var(--bg);box-shadow:var(--shadow)}
+        .setup-box .cmdline{margin:0}
+        .card2 .setup-box{display:flex;align-items:stretch;margin-top:8px}
+        .card2 .setup-box .row-btns{justify-content:flex-start}
+        .setup-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center}
+        .card2 .setup-row{justify-content:flex-start}
+        .setup-label{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+        .row-btns.center{justify-content:center}
 
         .caps{display:grid;gap:6px;margin:0;padding:0;list-style:none}
         .caps li{display:flex;gap:8px;align-items:flex-start;font-size:12.5px}

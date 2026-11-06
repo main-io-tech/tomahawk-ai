@@ -34,7 +34,7 @@ enum class AgentProvider(
 
 /** Onde a missão roda: na aba, com o andamento monitorado, ou no terminal da IDE, onde dá para conversar com a IA. */
 enum class RunMode(val label: String) {
-    BACKGROUND("Na aba, monitorada"),
+    BACKGROUND("Na aba, no devcontainer"),
     TERMINAL("No terminal da IDE"),
     ASK("Perguntar a cada vez"),
 }
@@ -61,8 +61,9 @@ object AgentCommand {
     /**
      * O comando sem janela, com a saída em `stream-json` para o Tomahawk acompanhar. Os comandos do Spec Kit rodam
      * scripts e escrevem arquivos, então o CLI recebe permissão para agir sem perguntar, como no despacho de
-     * workflows do próprio Spec Kit. Com [readOnly], para quando a IA só escreve um texto (o commit, o PR, a resposta
-     * a um comentário de outra pessoa), o CLI só lê: o Cursor no modo `ask` e sem `--force`, o Claude Code só com as
+     * workflows do próprio Spec Kit; por isso, sem [readOnly], ele só roda no devcontainer ([DevContainer]). Com
+     * [readOnly], para quando a IA só escreve um texto (o commit, o PR, a resposta a um comentário de outra pessoa),
+     * o CLI só lê: o Cursor no modo `ask` e sem `--force`, o Claude Code só com as
      * ferramentas de leitura. Aí os argumentos extras que liberariam tudo ficam de fora. [settings] é o arquivo com as
      * regras de proteção do Claude Code ([Guardrails]); no Cursor elas ficam no `.cursor/cli.json` do projeto.
      */
@@ -120,9 +121,26 @@ object AgentCommand {
         }
     }
 
+    /** [args] sem as opções que liberariam tudo sem perguntar, que o terminal não aceita. */
+    fun withoutFullAccess(args: List<String>): List<String> = buildList {
+        var skipValue = false
+        for (arg in args) {
+            when {
+                skipValue -> skipValue = false
+                arg in BYPASS_FLAGS -> Unit
+                arg == "--permission-mode" -> skipValue = true
+                arg.startsWith("--permission-mode=") -> Unit
+                else -> add(arg)
+            }
+        }
+    }
+
     /**
-     * O comando de uma linha para o terminal da IDE, interativo: o usuário acompanha, aprova e responde. [env]
-     * entra antes do comando, com a sintaxe de [shell].
+     * O comando de uma linha para o terminal da IDE, que roda nesta máquina e por isso nunca com permissão total.
+     * Interativo, no modo agente: o usuário acompanha, aprova os comandos e responde; o Cursor sem `--force` e o
+     * Claude Code em `acceptEdits`, que edita o projeto mas pergunta antes de rodar comandos. Sem [interactive] (o
+     * teste), só leitura, como em [headless], com a resposta em [output]. [env] entra antes do comando, com a sintaxe
+     * de [shell].
      */
     fun terminal(
         provider: AgentProvider,
@@ -134,31 +152,39 @@ object AgentCommand {
         env: Map<String, String> = emptyMap(),
         interactive: Boolean = true,
         settings: String? = null,
+        output: String? = null,
     ): String {
         val args = buildList {
-            if (!interactive) {
-                when (provider) {
-                    AgentProvider.CURSOR -> addAll(listOf("-p", "--force", "--trust", "--output-format", "text"))
-                    AgentProvider.CLAUDE -> addAll(listOf("-p", "--permission-mode", "bypassPermissions"))
-                }
+            when {
+                interactive -> if (provider == AgentProvider.CLAUDE) addAll(listOf("--permission-mode", "acceptEdits"))
+                provider == AgentProvider.CURSOR -> addAll(listOf("-p", "--trust", "--mode", "ask", "--output-format", "text"))
+                else -> addAll(listOf("-p", "--allowedTools", READ_TOOLS, "--permission-mode", "dontAsk"))
             }
             if (provider == AgentProvider.CLAUDE) settings?.let { addAll(listOf("--settings", it)) }
             model?.trim()?.takeIf { it.isNotEmpty() }?.let { addAll(listOf("--model", it)) }
-            addAll(extraArgs)
+            addAll(if (interactive) withoutFullAccess(extraArgs) else withoutBypass(extraArgs))
             add(oneLine(prompt))
         }
         val quoted = (listOf(executable) + args).map { quote(it, shell) }
-        val command = if (shell == ShellKind.POWERSHELL) "& " + quoted.joinToString(" ") else quoted.joinToString(" ")
-        if (env.isEmpty()) return command
-        val prefix = env.entries.joinToString("") { (key, value) ->
+        val command = (if (shell == ShellKind.POWERSHELL) "& " + quoted.joinToString(" ") else quoted.joinToString(" ")) +
+            output?.let { file ->
+                when (shell) {
+                    ShellKind.POWERSHELL -> " | Out-File -Encoding utf8 ${quote(file, shell)}"
+                    else -> " > ${quote(file, shell)}"
+                }
+            }.orEmpty()
+        return withEnv(shell, env, command)
+    }
+
+    /** [command] com [env] definido antes, na sintaxe de [shell]. */
+    fun withEnv(shell: ShellKind, env: Map<String, String>, command: String): String =
+        env.entries.joinToString("") { (key, value) ->
             when (shell) {
                 ShellKind.POWERSHELL -> "\$env:$key=${quote(value, shell)}; "
                 ShellKind.CMD -> "set \"$key=${value.replace("\"", "")}\" && "
                 ShellKind.POSIX -> "$key=${quote(value, shell)} "
             }
-        }
-        return prefix + command
-    }
+        } + command
 
     /** [inner], um comando POSIX, no shell de login da distribuição [distro] do WSL, em [workDir], com as aspas de [shell]. */
     fun wrapWsl(distro: String, workDir: String, inner: String, shell: ShellKind): String {

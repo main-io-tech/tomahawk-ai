@@ -26,13 +26,15 @@ import com.mio.tomahawk.speckit.SpecKitService
 import com.mio.tomahawk.ui.openArtifact
 import java.awt.datatransfer.StringSelection
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Dispara as etapas do Spec Kit pelo CLI de IA configurado, uma por vez por projeto. Na aba, o andamento fica em
- * [progress] para a Telemetria mostrar e cancelar; no terminal, o usuário conversa com a IA e o Tomahawk só registra.
+ * Dispara as etapas do Spec Kit pelo CLI de IA configurado, uma por vez por projeto. Na aba, a IA roda sem perguntar,
+ * e por isso só no devcontainer do projeto ([DevContainer]), com o andamento em [progress] para a Telemetria mostrar e
+ * cancelar; no terminal, nesta máquina, o usuário conversa com a IA e aprova os comandos, e o Tomahawk só registra.
  */
 @Service(Service.Level.PROJECT)
 class MissionRunner(private val project: Project) {
@@ -74,6 +76,12 @@ class MissionRunner(private val project: Project) {
             notify("Terminal indisponível", "O plugin de terminal da IDE está desligado: a missão roda na aba.", NotificationType.WARNING)
             null
         } else null
+        if (terminal == null) {
+            DevContainer.problem(root, provider)?.let { why ->
+                notifyNoContainer(mission, root, why)
+                return false
+            }
+        }
 
         FileDocumentManager.getInstance().saveAllDocuments()
         val invocation = snapshot.invocation(mission.step)
@@ -101,7 +109,12 @@ class MissionRunner(private val project: Project) {
                 current.step = "Pré-voo: preparando as proteções"
                 val guard = guard(root, runName, mission, provider) { current.log(LogKind.INFO, it) }
                 point = guard.point
-                execute(current, launch, prompt, env + AgentVerifier.apiKeyEnv(provider), extra, root, guard.settings)
+                current.step = "Pré-voo: subindo o devcontainer"
+                current.log(LogKind.INFO, "Subindo o devcontainer do projeto: a IA só roda sem perguntar lá dentro")
+                val session = DevContainer.up(root, { current.log(LogKind.INFO, it) }, { current.cancelled })
+                current.log(LogKind.INFO, "Devcontainer de pé e isolado: a IA só enxerga ${session.folder}")
+                val inside = AgentLaunch.container(session, provider.executables.first())
+                execute(current, inside, prompt, env + DevContainer.credentials(provider), extra, root, guard.settings)
             } catch (e: Throwable) {
                 LOG.warn("A missão falhou", e)
                 failure(current, prompt, e.message ?: "A execução não terminou.")
@@ -205,28 +218,8 @@ class MissionRunner(private val project: Project) {
         notify("Comando copiado", "Cole no chat do agente: ${text.take(120)}", NotificationType.INFORMATION)
     }
 
-    /** `specify init --here` no terminal da IDE, onde o usuário confirma; sem terminal, copia o comando. */
-    fun initSpecKit() {
-        val root = SpecKitService.getInstance(project).root() ?: return
-        val specify = TomahawkSettings.resolveSpecify()?.toString() ?: "specify"
-        val args = listOf(specify, "init", "--here", "--integration", TomahawkSettings.provider.integration, "--script", if (SystemInfo.isWindows) "ps" else "sh")
-        val terminal = LaunchTerminal.available()
-        if (terminal == null) {
-            val line = args.joinToString(" ")
-            CopyPasteManager.getInstance().setContents(StringSelection(line))
-            notify("Rode no terminal", "Comando copiado: $line", NotificationType.INFORMATION)
-            return
-        }
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val shell = ShellKind.of(terminal.shellPath(project), SystemInfo.isWindows)
-            val quoted = args.map { AgentCommand.quote(it, shell) }
-            val line = if (shell == ShellKind.POWERSHELL) "& " + quoted.joinToString(" ") else quoted.joinToString(" ")
-            ApplicationManager.getApplication().invokeLater({
-                runCatching { terminal.run(project, root.toString(), "Spec Kit: init", line) }
-                    .onFailure { notify("O terminal não abriu", it.message ?: it.javaClass.simpleName, NotificationType.ERROR) }
-            }, project.disposed)
-        }
-    }
+    /** `specify init --here` no terminal escolhido para o Spec Kit ([SpecKitSetup.init]); sem terminal, copia o comando. */
+    fun initSpecKit() = SpecKitSetup.init(project)
 
     private fun featureEnv(mission: Mission): Map<String, String> {
         val feature = mission.feature?.takeIf { mission.step != SddStep.SPECIFY } ?: return emptyMap()
@@ -384,23 +377,25 @@ class MissionRunner(private val project: Project) {
                     }
                 }
             }.apply { isDaemon = true; start() }
+            val stop = {
+                process.descendants().forEach { it.destroyForcibly() }
+                process.destroyForcibly()
+                launch.stop()
+            }
             while (!process.waitFor(100, TimeUnit.MILLISECONDS)) {
                 blocked.get()?.let { why ->
                     error = "Abortada pela proteção do Tomahawk: $why."
-                    process.descendants().forEach { it.destroyForcibly() }
-                    process.destroyForcibly()
+                    stop()
                 }
                 if (error != null) break
                 if (state.cancelled) {
                     cancelled = true
-                    process.descendants().forEach { it.destroyForcibly() }
-                    process.destroyForcibly()
+                    stop()
                     break
                 }
                 if (System.nanoTime() > deadline) {
                     error = "Passou do limite de $timeout minutos: a missão foi abortada."
-                    process.descendants().forEach { it.destroyForcibly() }
-                    process.destroyForcibly()
+                    stop()
                     break
                 }
             }
@@ -445,7 +440,7 @@ class MissionRunner(private val project: Project) {
     }
 
     private fun failure(state: MissionProgress, prompt: String, error: String) = Transcript.Entry(
-        state.mission.step, state.invocation, state.mission.feature, RunStatus.FAILED, error, null, state.startedAt,
+        state.mission.step, state.invocation, state.mission.feature, if (state.cancelled) RunStatus.CANCELLED else RunStatus.FAILED, error, null, state.startedAt,
         (System.currentTimeMillis() - state.startedAt) / 1000, state.provider.title, TomahawkSettings.model,
         state.mission.arguments, prompt, emptyList(), emptyList(), "", "", emptyList(),
     )
@@ -491,6 +486,31 @@ class MissionRunner(private val project: Project) {
                 ShowSettingsUtil.getInstance().showSettingsDialog(project, TomahawkConfigurable::class.java)
             })
             .notify(project)
+    }
+
+    /** Sem o devcontainer pronto, a missão não roda sem perguntar: cria o devcontainer ou lança no terminal. */
+    private fun notifyNoContainer(mission: Mission, root: Path, why: String) {
+        val notification = NotificationGroupManager.getInstance().getNotificationGroup(NOTIFICATION_GROUP)
+            .createNotification(
+                "Missões na aba só rodam no devcontainer",
+                escape("$why A IA só roda sem perguntar num container que enxerga apenas o projeto. No terminal da IDE, você aprova os comandos dela."),
+                NotificationType.WARNING,
+            )
+            .setIcon(TomahawkIcons.lancador)
+        if (DevContainer.cli() != null && !Files.isRegularFile(DevContainer.config(root))) {
+            notification.addAction(NotificationAction.createSimpleExpiring("Criar o devcontainer") {
+                runCatching { DevContainer.create(root) }
+                    .onSuccess { open(it) }
+                    .onFailure { notify("Não deu para criar o devcontainer", it.message ?: it.javaClass.simpleName, NotificationType.ERROR) }
+            })
+        }
+        if (LaunchTerminal.available() != null) {
+            notification.addAction(NotificationAction.createSimpleExpiring("Lançar no terminal") { launch(mission.copy(mode = RunMode.TERMINAL)) })
+        }
+        notification.addAction(NotificationAction.createSimpleExpiring("Abrir Arsenal") {
+            TomahawkToolWindowFactory.showTab(project, TomahawkToolWindowFactory.ARSENAL)
+        })
+        notification.notify(project)
     }
 
     private fun notify(

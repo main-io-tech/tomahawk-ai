@@ -18,26 +18,39 @@ enum class AgentHost(val label: String) {
 }
 
 /**
- * Como rodar o CLI: direto nesta máquina ou dentro de uma distribuição do WSL, pelo shell de login dela (que põe
- * `~/.local/bin` no PATH). [executable] é o caminho ou o nome do comando no sistema onde ele roda.
+ * Como rodar o CLI: direto nesta máquina, dentro de uma distribuição do WSL, pelo shell de login dela (que põe
+ * `~/.local/bin` no PATH), ou no devcontainer do projeto, nas missões na aba. [executable] é o caminho ou o nome do
+ * comando no sistema onde ele roda.
  */
-class AgentLaunch private constructor(val executable: String, val distro: String?) {
+class AgentLaunch private constructor(val executable: String, val distro: String?, private val container: DevContainer.Session? = null) {
 
     private val wsl: WSLDistribution? by lazy { distro?.let { WslDistributionManager.getInstance().getOrCreateDistributionByMsId(it) } }
 
-    val description: String get() = distro?.let { "WSL $it: $executable" } ?: executable
+    val description: String
+        get() = when {
+            container != null -> "devcontainer: $executable"
+            distro != null -> "WSL $distro: $executable"
+            else -> executable
+        }
 
-    /** Para as mensagens: " no WSL Ubuntu" ou vazio. */
-    val where: String get() = distro?.let { " no WSL $it" }.orEmpty()
+    /** Para as mensagens: " no WSL Ubuntu", " no devcontainer" ou vazio. */
+    val where: String
+        get() = when {
+            container != null -> " no devcontainer"
+            distro != null -> " no WSL $distro"
+            else -> ""
+        }
 
-    /** Um caminho desta máquina como o CLI o enxerga: igual, ou `/mnt/c/...` no WSL. */
-    fun workspace(path: String): String = wsl?.getWslPath(Path.of(path)) ?: path
+    /** Um caminho desta máquina como o CLI o enxerga: igual, `/mnt/c/...` no WSL ou `/workspaces/...` no container. */
+    fun workspace(path: String): String = container?.path(path) ?: wsl?.getWslPath(Path.of(path)) ?: path
 
     /**
      * O processo de [command] (que começa pelo [executable]) em [workDir], com [env] no ambiente. Com [scrub], nesta
-     * máquina, o processo não herda os segredos do ambiente ([Guardrails.environment]); o WSL já não herda o do Windows.
+     * máquina, o processo não herda os segredos do ambiente ([Guardrails.environment]); o WSL já não herda o do
+     * Windows, e o container só recebe [env].
      */
     fun process(command: List<String>, workDir: String, env: Map<String, String>, scrub: Boolean = false): GeneralCommandLine {
+        container?.let { return it.exec(command, env) }
         val line = GeneralCommandLine(command)
             .withWorkDirectory(workDir)
             .withCharset(StandardCharsets.UTF_8)
@@ -57,7 +70,15 @@ class AgentLaunch private constructor(val executable: String, val distro: String
         return distribution.patchCommandLine(line, null, options)
     }
 
-    /** O comando de uma linha para o terminal da IDE, que roda em [shell] nesta máquina. */
+    /** Para a IA de vez: no container, derruba o container, porque matar o processo daqui não a para lá dentro. */
+    fun stop() {
+        container?.stop()
+    }
+
+    /**
+     * O comando de uma linha para o terminal da IDE, que roda em [shell] nesta máquina. Com [output], a resposta vai
+     * para esse arquivo, relativo a [workDir].
+     */
     fun terminal(
         provider: AgentProvider,
         prompt: String,
@@ -68,10 +89,11 @@ class AgentLaunch private constructor(val executable: String, val distro: String
         env: Map<String, String> = emptyMap(),
         interactive: Boolean = true,
         settings: Path? = null,
+        output: String? = null,
     ): String {
         val rules = settings?.let { workspace(it.toString()) }
-        val distribution = distro ?: return AgentCommand.terminal(provider, executable, prompt, model, extraArgs, shell, env, interactive, rules)
-        val inner = AgentCommand.terminal(provider, executable, prompt, model, extraArgs, ShellKind.POSIX, env, interactive, rules)
+        val distribution = distro ?: return AgentCommand.terminal(provider, executable, prompt, model, extraArgs, shell, env, interactive, rules, output)
+        val inner = AgentCommand.terminal(provider, executable, prompt, model, extraArgs, ShellKind.POSIX, env, interactive, rules, output)
         return AgentCommand.wrapWsl(distribution, workspace(workDir), inner, shell)
     }
 
@@ -81,6 +103,9 @@ class AgentLaunch private constructor(val executable: String, val distro: String
         fun local(executable: Path) = AgentLaunch(executable.toString(), null)
 
         fun wsl(distro: String, executable: String) = AgentLaunch(executable, distro)
+
+        /** O CLI no container de pé, onde [executable] é o nome do comando no PATH do container. */
+        fun container(session: DevContainer.Session, executable: String) = AgentLaunch(executable, null, session)
 
         /** Windows com WSL: só aí a opção aparece. */
         val wslSupported: Boolean get() = SystemInfo.isWindows && runCatching { WSLUtil.isSystemCompatible() }.getOrDefault(false)

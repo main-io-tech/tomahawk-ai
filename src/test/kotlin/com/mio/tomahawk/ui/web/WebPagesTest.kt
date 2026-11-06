@@ -116,4 +116,20 @@ class WebPagesTest : BasePlatformTestCase() {
         assertTrue(pages.getValue("web-telemetry").html().contains("class=\"chart\""))
         assertTrue(pages.getValue("web-arsenal").html().contains("Salvar e testar"))
     }
+
+    fun testRendersTheLauncherBeforeTheSpecKit() {
+        val root = Path.of(project.basePath!!)
+        root.resolve(".specify").toFile().deleteRecursively()
+        SpecKitService.getInstance(project).refreshNow()
+        val out = Path.of(System.getProperty("user.dir"), "build", "preview")
+        Files.createDirectories(out)
+        val tab = LauncherWeb(project)
+        Disposer.register(testRootDisposable, tab)
+        val html = tab.html()
+        Files.writeString(out.resolve("web-launcher-init.html"), html)
+        assertTrue(html.contains("Prepare a base de lançamento"))
+        assertTrue(html.contains("class=\"setup-box\""))
+        assertTrue(html.contains("data-cmd=\"init-copy\""))
+        assertFalse(html.contains("class=\"btn primary big\" data-cmd=\"init\""))
+    }
 }

@@ -34,6 +34,7 @@ object TomahawkSettings {
     private const val TERMINAL_VERIFIED_AT_KEY = "Tomahawk.Agent.TerminalVerifiedAt"
     private const val AUTO_SETUP_KEY = "Tomahawk.Agent.AutoSetupTried"
     private const val SPECIFY_KEY = "Tomahawk.Specify.Executable"
+    private const val SPECIFY_SHELL_KEY = "Tomahawk.Specify.Shell"
     private const val GUARDRAILS_KEY = "Tomahawk.Agent.Guardrails"
     private val cursorCredentials = CredentialAttributes(generateServiceName("Tomahawk IA", "Cursor API key"))
 
@@ -89,6 +90,11 @@ object TomahawkSettings {
     var specifyExecutable: String?
         get() = props.getValue(SPECIFY_KEY)?.takeIf { it.isNotBlank() }
         set(value) = change { props.setValue(SPECIFY_KEY, value?.trim()?.takeIf { it.isNotEmpty() }) }
+
+    /** Onde rodam os comandos do Spec Kit no Windows: nulo é o shell padrão do terminal da IDE. */
+    var specKitShell: WindowsShell?
+        get() = WindowsShell.entries.firstOrNull { it.name == props.getValue(SPECIFY_SHELL_KEY) }
+        set(value) = change { props.setValue(SPECIFY_SHELL_KEY, value?.name) }
 
     /** As proteções da máquina nas missões ([Guardrails] e [Checkpoints]); ligadas por padrão. */
     var guardrails: Boolean

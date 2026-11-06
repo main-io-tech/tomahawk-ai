@@ -351,16 +351,9 @@ class LauncherWeb(project: Project) : WebTab(project) {
         append(WebUi.header("🚀", "Lançador", "Spec Kit não inicializado", "O Tomahawk dispara os comandos /speckit pelo ${esc(TomahawkSettings.provider.title)} CLI.", aiChip(ready)))
         if (!ready) append(aiNotice())
         append("<div class=\"empty2\"><div class=\"big\">🛰️</div><h3>Prepare a base de lançamento</h3>")
-        append("<p>Este projeto ainda não tem o <b>.specify/</b>. Inicialize o Spec Kit para instalar os comandos de SDD no agente escolhido (")
-        append(esc(TomahawkSettings.provider.integration)).append(").</p>")
-        append("<div class=\"cmdline\">specify init --here --integration ").append(esc(TomahawkSettings.provider.integration)).append("</div><div>")
-        append(
-            WebUi.button(
-                "⚡ Inicializar Spec Kit", "init", "primary big", enabled = specify != null && SpecKitSetup.job == null,
-                title = if (specify == null) "Instale o Spec Kit nesta máquina primeiro" else "Roda specify init --here no terminal da IDE",
-            ),
-        )
-        append("</div>")
+        append("<p>Este projeto ainda não tem o <b>.specify/</b>. Inicialize o Spec Kit para instalar os comandos de SDD do ")
+        append(esc(TomahawkSettings.provider.title)).append(" no projeto.</p>")
+        append(SpecKitWeb.initBox(specify))
         append("<div style=\"text-align:left;max-width:640px;margin:0 auto\">").append(SpecKitWeb.machine(specify)).append("</div>")
         append("</div>")
     }
@@ -430,7 +423,7 @@ class LauncherWeb(project: Project) : WebTab(project) {
         append("<textarea class=\"in\" name=\"text\" data-draft=\"${step.name}\" placeholder=\"").append(WebUi.attr(step.argsHint)).append("\">")
         append(esc(drafts[step].orEmpty())).append("</textarea></div>")
         append("<div class=\"st-tools\"><div class=\"row-btns\">")
-        append(WebUi.seg("mode", listOf(RunMode.BACKGROUND.name to "🛰️ Na aba, monitorada", RunMode.TERMINAL.name to "💻 No terminal"), mode.name, send = "mode"))
+        append(WebUi.seg("mode", listOf(RunMode.BACKGROUND.name to "🛰️ Na aba, no devcontainer", RunMode.TERMINAL.name to "💻 No terminal"), mode.name, send = "mode"))
         append("</div><div class=\"row-btns\">")
         val artifact = artifactOf(step, feature)
         if (artifact != null) append(WebUi.button("📄 Abrir artefato", "artifact", "ghost", arg = step.name))
@@ -444,7 +437,7 @@ class LauncherWeb(project: Project) : WebTab(project) {
         append(WebUi.button("🚀 Lançar", "launch", "primary big", arg = step.name, enabled = why == null, title = why ?: "Ctrl+Enter"))
         append("</div></div>")
         append("<div class=\"status-line\"><span class=\"kbd\">Ctrl</span> + <span class=\"kbd\">Enter</span> lança · ")
-        append(if (mode == RunMode.TERMINAL) "no terminal você conversa com a IA e responde às perguntas." else "na aba a Telemetria acompanha cada passo.")
+        append(if (mode == RunMode.TERMINAL) "no terminal você conversa com a IA, responde às perguntas e aprova os comandos." else "na aba a IA roda sem perguntar no devcontainer e a Telemetria acompanha cada passo.")
         append("</div></div>")
     }
 
@@ -549,7 +542,13 @@ class LauncherWeb(project: Project) : WebTab(project) {
             "artifact" -> step?.let { s -> artifactOf(s, if (newFeature) null else service.snapshot.active)?.let { openArtifact(project, it) } }
             "open" -> data.str("arg")?.let { openArtifact(project, Path.of(it)) }
             "init" -> runner.initSpecKit()
+            "init-copy" -> SpecKitSetup.copyInit(project)
+            "specify-shell" -> {
+                SpecKitWeb.choose(data.str("value"))
+                refresh(force = true)
+            }
             "specify-install" -> SpecKitSetup.install(project)
+            "specify-repair" -> SpecKitSetup.repair(project)
             "specify-upgrade" -> SpecKitSetup.upgrade(project)
             "specify-recheck" -> {
                 SpecKitSetup.recheck()

@@ -98,7 +98,8 @@ object AgentVerifier {
 
     /**
      * Testa o caminho do terminal da IDE com a configuração salva, no Windows ou no WSL: abre uma aba do terminal,
-     * pede à IA que grave OK num arquivo e espera o arquivo. Não muda o teste principal. [onDone] roda na EDT.
+     * pergunta à IA, só leitura, e o shell grava a resposta num arquivo, que o teste espera. Não muda o teste
+     * principal. [onDone] roda na EDT.
      */
     fun testTerminal(project: Project, onDone: (Outcome) -> Unit) {
         val terminal = LaunchTerminal.available() ?: return onDone(Outcome(false, "O plugin de terminal da IDE está desligado."))
@@ -113,9 +114,9 @@ object AgentVerifier {
         ApplicationManager.getApplication().executeOnPooledThread {
             val shellPath = terminal.shellPath(project)
             val shell = ShellKind.of(shellPath, SystemInfo.isWindows)
-            val prompt = "Teste de integracao do Tomahawk IA: grave apenas a palavra OK no arquivo $relative (crie as pastas se faltarem) e termine, sem fazer mais nada."
+            val prompt = "Teste de integracao do Tomahawk IA: responda apenas OK, sem fazer mais nada."
             val command = runCatching {
-                launch.terminal(provider, prompt, TomahawkSettings.model, AgentCommand.splitArgs(TomahawkSettings.extraArgs), shell, root, interactive = false)
+                launch.terminal(provider, prompt, TomahawkSettings.model, AgentCommand.splitArgs(TomahawkSettings.extraArgs), shell, root, interactive = false, output = relative)
             }
             ApplicationManager.getApplication().invokeLater({
                 try {

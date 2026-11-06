@@ -1,7 +1,9 @@
 package com.mio.tomahawk.run
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SpecKitSetupTest {
@@ -32,5 +34,36 @@ class SpecKitSetupTest {
         val check = "Update available: 0.11.8 → v1.3.0\n\nTo upgrade:\n  specify self upgrade\n"
         assertEquals("1.3.0", SpecKitSetup.latestIn(check))
         assertNull(SpecKitSetup.latestIn("specify-cli is up to date (1.3.0)"))
+    }
+
+    @Test
+    fun `reconhece o specify com defeito e reinstala por cima`() {
+        val crash = "Traceback (most recent call last):\n  File \"specify.exe\\__main__.py\", line 4\nModuleNotFoundError: No module named 'specify_cli'"
+        assertTrue(SpecKitSetup.brokenIn(crash))
+        assertFalse(SpecKitSetup.brokenIn("specify 1.3.1"))
+        assertEquals("& 'C:\\u\\uv.exe' 'tool' 'install' '--force' 'specify-cli'", SpecKitSetup.installCommand(ShellKind.POWERSHELL, "C:\\u\\uv.exe", force = true))
+    }
+
+    @Test
+    fun `o init roda sem perguntas e com o Python em UTF-8, na sintaxe de cada shell`() {
+        assertEquals(
+            "\$env:PYTHONUTF8='1'; \$env:PYTHONIOENCODING='utf-8'; & 'C:\\s\\specify.exe' 'init' '--here' '--force' '--integration' 'cursor-agent' '--script' 'ps' '--ignore-agent-tools'",
+            SpecKitSetup.initCommand(ShellKind.POWERSHELL, "C:\\s\\specify.exe", "cursor-agent", "ps"),
+        )
+        assertEquals(
+            "set \"PYTHONUTF8=1\" && set \"PYTHONIOENCODING=utf-8\" && \"C:\\s\\specify.exe\" \"init\" \"--here\" \"--force\" \"--integration\" \"claude\" \"--script\" \"ps\" \"--ignore-agent-tools\"",
+            SpecKitSetup.initCommand(ShellKind.CMD, "C:\\s\\specify.exe", "claude", "ps"),
+        )
+    }
+
+    @Test
+    fun `o PowerShell abre ja rodando o comando, mostrado antes`() {
+        val shell = WindowsShell.POWERSHELL.startup("& 'specify' 'init'")
+        assertEquals(listOf("powershell.exe", "-NoLogo", "-NoExit", "-EncodedCommand"), shell.dropLast(1))
+        val script = String(java.util.Base64.getDecoder().decode(shell.last()), Charsets.UTF_16LE)
+        assertEquals("Write-Host '> & ''specify'' ''init''' -ForegroundColor DarkGray; & 'specify' 'init'", script)
+        val cmd = WindowsShell.CMD.startup("\"specify\" \"init\"")
+        assertEquals(listOf("cmd.exe", "/k"), cmd.dropLast(1))
+        assertEquals("@chcp 65001 > nul\r\n\"specify\" \"init\"\r\n", java.nio.file.Files.readString(java.nio.file.Path.of(cmd.last())))
     }
 }

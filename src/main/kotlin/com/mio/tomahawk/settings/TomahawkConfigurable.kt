@@ -25,6 +25,7 @@ import com.mio.tomahawk.run.AgentHost
 import com.mio.tomahawk.run.AgentLaunch
 import com.mio.tomahawk.run.AgentProvider
 import com.mio.tomahawk.run.AgentVerifier
+import com.mio.tomahawk.run.DevContainer
 import com.mio.tomahawk.run.LaunchTerminal
 import com.mio.tomahawk.run.RunMode
 import com.mio.tomahawk.run.TomahawkSettings
@@ -112,8 +113,9 @@ class TomahawkConfigurable : Configurable {
             .addLabeledComponent("Tempo máximo (min):", timeout)
             .addLabeledComponent("Argumentos extras:", extraArgs)
             .addComponentToRightColumn(small(
-                "Missões na aba: o Cursor roda com -p --trust --force e o Claude Code com -p --permission-mode bypassPermissions, como no despacho de " +
-                    "workflows do Spec Kit: a IA roda scripts e escreve arquivos sem perguntar. No terminal da IDE, você aprova cada passo. " +
+                "Missões na aba: só no devcontainer do projeto (${DevContainer.CONFIG}), a única forma de a IA rodar sem perguntar; lá o Cursor roda " +
+                    "com -p --trust --force e o Claude Code com -p --permission-mode bypassPermissions. No terminal da IDE, modo agente sem permissão " +
+                    "total: o Cursor sem --force e o Claude Code em --permission-mode acceptEdits pedem a sua aprovação para os comandos. " +
                     "Textos (commit, PR, respostas do Rádio) e o teste rodam só leitura: Cursor em --mode ask, Claude Code em --permission-mode dontAsk.",
             ))
             .addLabeledComponent("Chave de API do Cursor:", cursorKey)

@@ -70,8 +70,29 @@ class RunTest {
     fun `monta o comando do terminal com as variáveis da feature na sintaxe do shell`() {
         val env = mapOf("SPECIFY_FEATURE" to "001-x")
         assertEquals("\$env:SPECIFY_FEATURE='001-x'; & 'agent' 'go'", AgentCommand.terminal(AgentProvider.CURSOR, "agent", "go", null, emptyList(), ShellKind.POWERSHELL, env))
-        assertEquals("SPECIFY_FEATURE='001-x' 'claude' 'go'", AgentCommand.terminal(AgentProvider.CLAUDE, "claude", "go", null, emptyList(), ShellKind.POSIX, env))
+        assertEquals(
+            "SPECIFY_FEATURE='001-x' 'claude' '--permission-mode' 'acceptEdits' 'go'",
+            AgentCommand.terminal(AgentProvider.CLAUDE, "claude", "go", null, emptyList(), ShellKind.POSIX, env),
+        )
         assertEquals(listOf("--a", "b c", "d"), AgentCommand.splitArgs("--a \"b c\" d"))
+    }
+
+    @Test
+    fun `no terminal a IA nunca ganha permissao total, nem pelos argumentos extras`() {
+        val extra = listOf("--approve-mcps", "--force", "-f", "--yolo", "--permission-mode", "bypassPermissions", "--permission-mode=bypassPermissions", "--dangerously-skip-permissions")
+        assertEquals("'agent' '--approve-mcps' 'go'", AgentCommand.terminal(AgentProvider.CURSOR, "agent", "go", null, extra, ShellKind.POSIX))
+        assertEquals(
+            "'claude' '--permission-mode' 'acceptEdits' '--approve-mcps' 'go'",
+            AgentCommand.terminal(AgentProvider.CLAUDE, "claude", "go", null, extra, ShellKind.POSIX),
+        )
+        assertEquals(
+            "& 'agent' '-p' '--trust' '--mode' 'ask' '--output-format' 'text' '--approve-mcps' 'OK' | Out-File -Encoding utf8 'tomahawk/testes/t.md'",
+            AgentCommand.terminal(AgentProvider.CURSOR, "agent", "OK", null, extra, ShellKind.POWERSHELL, interactive = false, output = "tomahawk/testes/t.md"),
+        )
+        assertEquals(
+            "'claude' '-p' '--allowedTools' 'Read,Grep,Glob' '--permission-mode' 'dontAsk' '--approve-mcps' 'OK' > 't.md'",
+            AgentCommand.terminal(AgentProvider.CLAUDE, "claude", "OK", null, extra, ShellKind.POSIX, interactive = false, output = "t.md"),
+        )
     }
 
     @Test
